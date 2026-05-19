@@ -1,2 +1,2 @@
 # ZoeyAgent
-Powering zoey's agent applications
+Zoey's trip planner agent
