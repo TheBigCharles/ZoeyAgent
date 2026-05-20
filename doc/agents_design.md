@@ -521,7 +521,45 @@ SpecialistSearchSubgraph
 
 The main graph remains the global Plan-and-Solve controller. Specialist subgraphs are allowed to reason iteratively within their narrow domain, but they should not own final itinerary synthesis or direct long-term memory writes.
 
-Implementation can use shared helper/factory functions instead of class inheritance. The important part is shared behavior and contracts, not Python inheritance.
+Implementation should use a shared methodology with domain-specific configuration. This avoids duplicated graph/node logic without forcing attraction and hotel search into one universal subgraph.
+
+Reusable pieces:
+
+- `ContextAssembler`
+- `PromptTemplateRegistry`
+- `BaseLLMNode`
+- `BaseReActStepExecutor`
+- retry policy
+- step observation format
+- `SearchQuality`
+- working-memory write helpers
+- subgraph result write-back helpers
+
+Domain-specific pieces:
+
+- task planner prompt
+- step executor prompt
+- evaluator rules or evaluator prompt
+- ranking policy
+- allowed tools
+- output schema
+- memory candidate rules
+
+Configuration example:
+
+```python
+SpecialistSearchConfig(
+    name="hotel",
+    planner_prompt="HotelTaskPlannerPrompt",
+    executor_prompt="HotelStepExecutorPrompt",
+    evaluator_prompt="HotelStepEvaluatorPrompt",
+    allowed_tools=[...],
+    output_schema="HotelSearchResult",
+    ranking_policy="hotel_ranking_policy",
+)
+```
+
+The attraction subgraph should use the same structure with attraction-specific prompts, tools, evaluator rules, ranking policy, and output schema.
 
 Recommended internal state for each specialist subgraph:
 
@@ -538,6 +576,30 @@ final_result
 ```
 
 Each subgraph should have explicit max retry limits. If a step cannot be made valid, the subgraph should return the best available candidates plus structured quality warnings instead of blocking the whole trip planner indefinitely.
+
+## Context Assembly Design
+
+Context assembly has two layers:
+
+- `ContextAssemblyNode`: the explicit main-graph node used before `PlannerNode`.
+- `ContextAssembler`: a reusable class/service used inside every LLM node, including specialist subgraph LLM nodes.
+
+Core rule:
+
+```text
+Every LLM node
+  -> ContextAssembler
+  -> PromptTemplate
+  -> LLM call
+  -> Structured output validation
+  -> State update
+```
+
+Deterministic or rule-only nodes do not need `ContextAssembler`. Examples:
+
+- `WeatherQueryNode`
+- pure rule `StepEvaluatorNode`
+- pure tool normalization nodes
 
 ### ContextAssemblyNode
 
@@ -591,7 +653,49 @@ Recommended sections:
 [Output Schema]
 ```
 
-It should be used before major planner reasoning calls. Specialist subgraphs should use smaller local prompt builders rather than the full global context assembly.
+This explicit node is mainly for the main planner path. Specialist subgraphs should not draw a separate `ContextAssemblyNode` before every sub-node. Instead, their LLM nodes should call the reusable `ContextAssembler` internally with a local context profile and prompt template.
+
+### ContextAssembler
+
+Purpose: reusable context engineering service for all LLM nodes.
+
+It implements the same GSSC mechanism as `ContextAssemblyNode`, but with node-specific context profiles and prompt templates.
+
+Example profiles:
+
+```text
+global_planner
+attraction_task_planner
+attraction_step_executor
+attraction_step_evaluator
+hotel_task_planner
+hotel_step_executor
+hotel_step_evaluator
+repair_replan
+```
+
+Each LLM node configures:
+
+- `context_profile`
+- `prompt_template`
+- `output_schema`
+- `allowed_tools`
+
+Specialist subgraph examples:
+
+- `AttractionTaskPlannerNode` uses `ContextAssembler(profile="attraction_task_planner")`.
+- `AttractionReActStepExecutorNode` uses `ContextAssembler(profile="attraction_step_executor")`.
+- `HotelTaskPlannerNode` uses `ContextAssembler(profile="hotel_task_planner")`.
+- `HotelReActStepExecutorNode` uses `ContextAssembler(profile="hotel_step_executor")`.
+- If a step evaluator is LLM-based, it uses the matching evaluator profile.
+- If a step evaluator is pure rules, it does not call the LLM and does not need `ContextAssembler`.
+
+LangGraph fit:
+
+- `ContextAssembler` does not need to be a LangGraph node.
+- LangGraph nodes can be implemented as callables/classes that receive state and return state updates.
+- A node can internally call `ContextAssembler`, a prompt template, an LLM, and an output validator before returning its state update.
+- A compiled specialist subgraph can still be attached to the parent graph; if its local state differs from parent state, use a wrapper node to map state in and out.
 
 Memory scoring:
 

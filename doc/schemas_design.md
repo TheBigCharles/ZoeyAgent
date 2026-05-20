@@ -415,6 +415,90 @@ class ContextConfig(BaseModel):
     confidence_weight: float = Field(default=0.10, ge=0, le=1)
 ```
 
+### ContextProfile
+
+Used by reusable `ContextAssembler` instances to decide which information sources and output sections a specific LLM node may receive.
+
+```python
+class ContextProfile(BaseModel):
+    profile_name: str
+    max_tokens: int = Field(default=3000, gt=0)
+    allowed_sources: list[str] = Field(default_factory=list)
+    required_sections: list[str] = Field(default_factory=list)
+    compression_policy: str = Field(default="trim_low_priority")
+    output_schema_name: str | None = None
+```
+
+Example profile names:
+
+```text
+global_planner
+attraction_task_planner
+attraction_step_executor
+attraction_step_evaluator
+hotel_task_planner
+hotel_step_executor
+hotel_step_evaluator
+repair_replan
+```
+
+### PromptTemplateSpec
+
+Used by `PromptTemplateRegistry` to describe node-specific prompts.
+
+```python
+class PromptTemplateSpec(BaseModel):
+    template_name: str
+    role: str
+    task: str
+    input_fields: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    output_schema_name: str
+    forbidden_outputs: list[str] = Field(default_factory=list)
+```
+
+### LLMNodeSpec
+
+Used to document each node that talks to an LLM.
+
+```python
+class LLMNodeSpec(BaseModel):
+    node_name: str
+    context_profile: str
+    prompt_template: str
+    output_schema_name: str
+    allowed_tools: list[str] = Field(default_factory=list)
+    uses_context_assembler: bool = True
+```
+
+Design notes:
+
+- Every LLM node must use `ContextAssembler`.
+- Deterministic or rule-only nodes should not be modeled as `LLMNodeSpec`.
+- `WeatherQueryNode` is deterministic and does not use `ContextAssembler`.
+
+### SpecialistSearchConfig
+
+Used to define a shared search-subgraph methodology with domain-specific configuration.
+
+```python
+class SpecialistSearchConfig(BaseModel):
+    name: str
+    planner_prompt: str
+    executor_prompt: str
+    evaluator_prompt: str | None = None
+    allowed_tools: list[str] = Field(default_factory=list)
+    output_schema_name: str
+    ranking_policy: str
+    max_retries: int = Field(default=3, ge=0)
+    memory_candidate_policy: str | None = None
+```
+
+Design notes:
+
+- `AttractionSearchSubgraph` and `HotelSearchSubgraph` use the same methodology.
+- They should not be forced into one universal subgraph because prompts, evaluator rules, ranking policies, tools, and output schemas are domain-specific.
+
 ### NormalizedTripRequest
 
 `NormalizedTripRequest` is the cleaned version of `TripPlanRequest` used by graph nodes.

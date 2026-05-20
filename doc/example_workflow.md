@@ -130,6 +130,8 @@ What it does:
 
 - Creates a local attraction-search plan.
 - Converts preferences into provider search keywords.
+- Calls LLM through `ContextAssembler(profile="attraction_task_planner")`.
+- Uses `AttractionTaskPlannerPrompt`.
 
 Possible keywords:
 
@@ -157,6 +159,8 @@ What it does:
 - Executes each attraction-search step.
 - Calls restricted Amap tools.
 - Observes results and normalizes partial POI data.
+- Calls LLM through `ContextAssembler(profile="attraction_step_executor")` when choosing the next tool/action.
+- Uses `AttractionStepExecutorPrompt`.
 
 Tools that may be called:
 
@@ -191,6 +195,8 @@ What it does:
 - Checks whether attraction results are good enough.
 - Validates result count, coordinates, address, preference match, and quality.
 - If results are weak, asks executor to retry with different keywords or wider scope.
+- If rule-based, it does not call LLM and does not use `ContextAssembler`.
+- If LLM-based, it uses `ContextAssembler(profile="attraction_step_evaluator")`.
 
 Expected candidate examples:
 
@@ -230,6 +236,7 @@ Memory:
 What it does:
 
 - Queries weather for Hangzhou from 2026-07-05 to 2026-07-08.
+- Deterministic node. It does not call LLM and does not use `ContextAssembler`.
 
 Tools called:
 
@@ -275,6 +282,8 @@ What it does:
 
 - Creates a local hotel-search plan.
 - Chooses search anchors.
+- Calls LLM through `ContextAssembler(profile="hotel_task_planner")`.
+- Uses `HotelTaskPlannerPrompt`.
 
 Possible anchors:
 
@@ -301,6 +310,8 @@ What it does:
 - Searches hotel candidates around anchors.
 - Checks nearby parking when driving is selected.
 - Uses direction tools only for distance/time/mode summaries.
+- Calls LLM through `ContextAssembler(profile="hotel_step_executor")` when choosing the next tool/action.
+- Uses `HotelStepExecutorPrompt`.
 
 Tools that may be called:
 
@@ -331,6 +342,8 @@ What it does:
 
 - Checks whether hotel candidates are valid.
 - If invalid, asks executor to increase radius, switch anchor, or add a keyword.
+- If rule-based, it does not call LLM and does not use `ContextAssembler`.
+- If LLM-based, it uses `ContextAssembler(profile="hotel_step_evaluator")`.
 
 Checks:
 
@@ -582,4 +595,3 @@ The actual content depends on Amap tool results and PlannerNode generation. The 
   "generated_at": "..."
 }
 ```
-
