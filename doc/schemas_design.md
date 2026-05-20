@@ -14,12 +14,12 @@ The goal is to avoid passing loose dictionaries between the frontend, backend, t
 
 The frontend collects travel planning input from the user:
 
-- Destination city
+- Destination cities
 - Start and end dates
-- Travel preferences
+- Travel preferences as enum indexes
 - Budget
-- Transportation type
-- Accommodation type
+- Transportation preference
+- Accommodation preference
 - Extra requirements
 
 The backend receives this input as `TripPlanRequest`, runs the LangGraph agents workflow, and returns a validated `TripPlan`.
@@ -27,15 +27,15 @@ The backend receives this input as `TripPlanRequest`, runs the LangGraph agents 
 The result page needs structured data for:
 
 - Trip overview
-- Budget breakdown
-- Attraction map
+- Per-day price totals
+- Per-day map points
 - Daily itinerary
 - Weather information
 - Hotel recommendation
 - Meal suggestions
 - Editable attraction cards
 
-Because the frontend needs to render maps and editable itinerary cards, the response must include structured fields such as coordinates, attraction order, prices, daily groupings, weather, and budget totals.
+Because the frontend needs to render maps and editable itinerary cards, the response must include structured fields such as coordinates, attraction order, daily prices, daily map points, daily groupings, and weather. Trip-level price totals are calculated by the frontend from `days[*].total_price`.
 
 ## Design Principles
 
@@ -61,7 +61,6 @@ Domain models:
   Hotel
   Meal
   WeatherInfo
-  Budget
   DayPlan
 
 Graph/internal models:
@@ -78,6 +77,75 @@ Graph/internal models:
 
 ## API Models
 
+### Preference Enums
+
+Frontend preference inputs are integer indexes. Backend schemas should convert those indexes into English enum values for normalized internal use. The frontend is responsible for translating enum values into display labels.
+
+```python
+from enum import IntEnum
+
+class TransportPreference(IntEnum):
+    PUBLIC_TRANSPORT = 0
+    DRIVING = 1
+
+    @property
+    def value_en(self) -> str:
+        return {
+            TransportPreference.PUBLIC_TRANSPORT: "public_transport",
+            TransportPreference.DRIVING: "driving",
+        }[self]
+
+class AccommodationPreference(IntEnum):
+    BUDGET_HOTEL = 0
+    MID_LEVEL_HOTEL = 1
+    FIVE_STAR_HOTEL = 2
+
+    @property
+    def value_en(self) -> str:
+        return {
+            AccommodationPreference.BUDGET_HOTEL: "budget_hotel",
+            AccommodationPreference.MID_LEVEL_HOTEL: "mid_level_hotel",
+            AccommodationPreference.FIVE_STAR_HOTEL: "five_star_hotel",
+        }[self]
+
+class AttractionPreference(IntEnum):
+    HISTORY_CULTURE = 0
+    NATURE = 1
+    FOOD = 2
+    SHOPPING = 3
+    ART = 4
+    LEISURE = 5
+
+    @property
+    def value_en(self) -> str:
+        return {
+            AttractionPreference.HISTORY_CULTURE: "history_culture",
+            AttractionPreference.NATURE: "nature",
+            AttractionPreference.FOOD: "food",
+            AttractionPreference.SHOPPING: "shopping",
+            AttractionPreference.ART: "art",
+            AttractionPreference.LEISURE: "leisure",
+        }[self]
+```
+
+### TripPreferencesInput
+
+```python
+class TripPreferencesInput(BaseModel):
+    transport_preference: TransportPreference = Field(..., description="Single transport preference enum index")
+    accommodation_preference: list[AccommodationPreference] = Field(default_factory=list, description="Accommodation preference enum indexes")
+    attraction_preference: list[AttractionPreference] = Field(default_factory=list, description="Attraction preference enum indexes")
+```
+
+Design notes:
+
+- `transport_preference` is single-select.
+- `accommodation_preference` is multi-select.
+- `attraction_preference` is multi-select.
+- The frontend sends integer indexes.
+- Backend and LLM-facing normalized models should use English enum values.
+- Provider-returned text fields such as `city`, `name`, `address`, and `description` should be preserved as-is.
+
 ### TripPlanRequest
 
 `TripPlanRequest` is the public input model for `POST /api/trip/plan`.
@@ -86,26 +154,36 @@ It represents the frontend form.
 
 ```python
 from datetime import date
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class TripPlanRequest(BaseModel):
     user_id: str = Field(default="default_user", description="User identifier")
-    city: str = Field(..., description="Destination city")
+    cities: list[str] = Field(..., min_length=1, description="Destination cities")
     start_date: date = Field(..., description="Trip start date")
     end_date: date = Field(..., description="Trip end date")
-    preferences: list[str] = Field(default_factory=list, description="Travel preferences")
+    preferences: TripPreferencesInput = Field(..., description="Indexed frontend preference selections")
     budget: int | None = Field(default=None, ge=0, description="Total budget")
-    transportation: str = Field(default="public_transit", description="Preferred transportation")
-    accommodation: str = Field(default="economy", description="Accommodation preference")
-    extra_requirements: str | None = Field(default=None, description="Free-form user requirements")
+    extra_requirements: str = Field(default="", description="Free-form user requirements; may be long")
     session_id: str = Field(..., description="Client-generated planning session ID")
+
+    @field_validator("cities")
+    @classmethod
+    def validate_cities(cls, value: list[str]) -> list[str]:
+        cleaned = [city.strip() for city in value if city and city.strip()]
+        if not cleaned:
+            raise ValueError("cities must contain at least one valid city string")
+        return cleaned
 ```
 
 Design notes:
 
 - `start_date` and `end_date` should be real `date` values, not free-form strings.
-- `preferences` is a list so the frontend can pass checkbox values directly.
+- `cities` is a non-empty list of valid city strings.
+- `preferences` is a structured object containing enum indexes from the frontend.
+- `transport_preference = 0` means `public_transport`, covering bus, train, subway, and taxi.
+- Preference enum indexes are converted into English enum values during normalization. Frontend display translation is not a backend concern.
 - `session_id` is required. The client/frontend generates it, and the backend uses it as the LangGraph `thread_id`.
+- `extra_requirements` may be a very long string. It should be included in context assembly with token budgeting, not blindly expanded in every local subgraph prompt.
 
 ### TripPlan
 
@@ -115,21 +193,21 @@ It must contain everything the frontend needs to render the result page.
 
 ```python
 class TripPlan(BaseModel):
-    city: str = Field(..., description="Destination city")
+    cities: list[str] = Field(..., description="Destination cities")
     start_date: date = Field(..., description="Trip start date")
     end_date: date = Field(..., description="Trip end date")
     days: list[DayPlan] = Field(default_factory=list, description="Daily itinerary")
     weather_info: list[WeatherInfo] = Field(default_factory=list, description="Weather by date")
     overall_suggestions: str = Field(..., description="Overall travel suggestions")
-    budget: Budget = Field(default_factory=Budget, description="Budget breakdown")
-    map_points: list[MapPoint] = Field(default_factory=list, description="Points used by the map")
     generated_at: str | None = Field(default=None, description="Generation timestamp")
 ```
 
 Design notes:
 
-- `map_points` can be derived from `days[*].attractions`, but including it makes the frontend simpler.
-- `budget` should default to an empty budget object instead of `None`, so the frontend can render consistently.
+- `TripPlan` is day-centric. It does not include top-level `budget` or top-level `map_points`.
+- The frontend calculates total trip price by summing `days[*].total_price`.
+- Each `DayPlan` owns its own `map_points` so the frontend can render per-day maps directly.
+- Because `cities` can contain multiple destinations, `DayPlan`, `WeatherInfo`, and map/POI-like records should include `city` so the frontend and planner can distinguish records across cities.
 
 ### TripRecalculateRequest
 
@@ -147,7 +225,7 @@ class TripRecalculateRequest(BaseModel):
 
 Future use:
 
-- Recalculate budget after user edits.
+- Recalculate per-day price totals after user edits.
 - Recalculate map route after reorder/delete.
 - Apply local itinerary edits.
 - Optionally trigger partial replanning.
@@ -169,13 +247,14 @@ External APIs should be normalized into this format, even if they return `lng`, 
 ```python
 class Attraction(BaseModel):
     name: str = Field(..., description="Attraction name")
+    city: str | None = Field(default=None, description="City this attraction belongs to")
     address: str = Field(default="", description="Address")
     location: Location | None = Field(default=None, description="Coordinates")
     visit_duration: int = Field(default=90, gt=0, description="Suggested visit duration in minutes")
     description: str = Field(default="", description="Attraction description")
     category: str = Field(default="attraction", description="Attraction category")
     rating: float | None = Field(default=None, ge=0, le=5, description="Rating")
-    image_url: str | None = Field(default=None, description="Image URL")
+    image_url: str | None = Field(default=None, description="Deferred image URL slot")
     ticket_price: int = Field(default=0, ge=0, description="Ticket price")
     poi_id: str | None = Field(default=None, description="Provider POI ID")
     order_index: int | None = Field(default=None, ge=0, description="Order within the day")
@@ -186,12 +265,14 @@ Design notes:
 
 - `order_index` supports editable itinerary cards.
 - `location` is optional at the model level because some provider results may be incomplete, but `ValidateTripPlanNode` should prefer complete map-ready attractions.
+- `image_url` is intentionally nullable. Photo enrichment is deferred for the MVP.
 
 ### Hotel
 
 ```python
 class Hotel(BaseModel):
     name: str = Field(..., description="Hotel name")
+    city: str | None = Field(default=None, description="City this hotel belongs to")
     address: str = Field(default="", description="Hotel address")
     location: Location | None = Field(default=None, description="Hotel location")
     price_range: str = Field(default="", description="Price range")
@@ -201,24 +282,37 @@ class Hotel(BaseModel):
     estimated_cost: int = Field(default=0, ge=0, description="Estimated cost per night")
     poi_id: str | None = Field(default=None, description="Provider POI ID")
     distance_to_main_area_km: float | None = Field(default=None, ge=0, description="Distance to main itinerary area")
+    estimated_travel_time_minutes: int | None = Field(default=None, ge=0, description="Estimated travel time to main itinerary area")
+    transit_method: str | None = Field(default=None, description="Summary transport mode, such as walking/driving/transit")
     source: str | None = Field(default=None, description="Data source")
 ```
+
+Design notes:
+
+- Hotel route fields are summary signals for ranking and planning support.
+- Do not store full route instructions such as bus lines, station counts, or turn-by-turn directions in the MVP.
 
 ### Meal
 
 ```python
 from typing import Literal
 
-MealType = Literal["breakfast", "lunch", "dinner", "snack"]
+MealType = Literal["breakfast", "lunch", "dinner"]
 
 class Meal(BaseModel):
     type: MealType = Field(..., description="Meal type")
     name: str = Field(..., description="Restaurant or meal suggestion")
+    city: str | None = Field(default=None, description="City this meal belongs to")
     address: str | None = Field(default=None, description="Address")
     location: Location | None = Field(default=None, description="Coordinates")
     description: str | None = Field(default=None, description="Description")
     estimated_cost: int = Field(default=0, ge=0, description="Estimated cost")
 ```
+
+Design notes:
+
+- Every `DayPlan.meals` list must contain exactly one `breakfast`, one `lunch`, and one `dinner`.
+- Meal objects remain plain JSON dictionaries inside the `meals` list, so frontend extraction can key by `type`.
 
 ### WeatherInfo
 
@@ -226,6 +320,7 @@ class Meal(BaseModel):
 from pydantic import field_validator
 
 class WeatherInfo(BaseModel):
+    city: str = Field(..., description="City this weather record belongs to")
     date: date = Field(..., description="Weather date")
     day_weather: str = Field(..., description="Day weather")
     night_weather: str = Field(default="", description="Night weather")
@@ -243,15 +338,16 @@ class WeatherInfo(BaseModel):
         return value
 ```
 
-### Budget
+### MapPoint
 
 ```python
-class Budget(BaseModel):
-    total_attractions: int = Field(default=0, ge=0, description="Total attraction tickets")
-    total_hotels: int = Field(default=0, ge=0, description="Total hotel cost")
-    total_meals: int = Field(default=0, ge=0, description="Total meal cost")
-    total_transportation: int = Field(default=0, ge=0, description="Total transportation cost")
-    total: int = Field(default=0, ge=0, description="Total estimated cost")
+class MapPoint(BaseModel):
+    name: str
+    city: str | None = None
+    location: Location
+    day_index: int | None = None
+    order_index: int | None = None
+    point_type: str = Field(default="attraction", description="attraction/hotel/meal")
 ```
 
 ### DayPlan
@@ -260,26 +356,27 @@ class Budget(BaseModel):
 class DayPlan(BaseModel):
     date: date = Field(..., description="Date")
     day_index: int = Field(..., ge=0, description="Day index starting from 0")
+    city: str = Field(..., description="City for this day")
     description: str = Field(..., description="Daily itinerary summary")
     transportation: str = Field(..., description="Transportation plan")
     accommodation: str = Field(..., description="Accommodation summary")
     hotel: Hotel | None = Field(default=None, description="Hotel for this day")
     attractions: list[Attraction] = Field(default_factory=list, description="Attractions")
     meals: list[Meal] = Field(default_factory=list, description="Meals")
-    route_distance_km: float | None = Field(default=None, ge=0, description="Estimated route distance")
-    route_duration_minutes: int | None = Field(default=None, ge=0, description="Estimated route duration")
+    map_points: list[MapPoint] = Field(default_factory=list, description="Map points for this day")
+    total_price: int = Field(default=0, ge=0, description="Total estimated price for this day")
+    route_distance_km: float | None = Field(default=None, ge=0, description="Estimated route summary distance")
+    route_duration_minutes: int | None = Field(default=None, ge=0, description="Estimated route summary duration")
+    transit_method: str | None = Field(default=None, description="Summary transport mode for the day")
 ```
 
-### MapPoint
+Design notes:
 
-```python
-class MapPoint(BaseModel):
-    name: str
-    location: Location
-    day_index: int | None = None
-    order_index: int | None = None
-    point_type: str = Field(default="attraction", description="attraction/hotel/meal")
-```
+- `map_points` lives under each day, not at the top level.
+- `total_price` is the only required price summary. The frontend calculates trip-level total by summing all days.
+- `route_distance_km`, `route_duration_minutes`, and `transit_method` are lightweight route summary slots.
+- They may be filled from Amap direction tools for ranking/planning support.
+- Full route instructions are deferred and should not be returned in the MVP.
 
 ## Graph/Internal Models
 
@@ -321,19 +418,21 @@ class ContextConfig(BaseModel):
 ### NormalizedTripRequest
 
 `NormalizedTripRequest` is the cleaned version of `TripPlanRequest` used by graph nodes.
+Preference fields contain English enum values such as `public_transport`, `budget_hotel`, and `history_culture`.
+Provider text fields remain as returned by the provider.
 
 ```python
 class NormalizedTripRequest(BaseModel):
     user_id: str
-    city: str
+    cities: list[str]
     start_date: date
     end_date: date
     days_count: int = Field(..., gt=0)
-    preferences: list[str] = Field(default_factory=list)
+    transport_preference: str
+    accommodation_preferences: list[str] = Field(default_factory=list)
+    attraction_preferences: list[str] = Field(default_factory=list)
     budget: int | None = Field(default=None, ge=0)
-    transportation: str
-    accommodation: str
-    extra_requirements: str | None = None
+    extra_requirements: str = ""
     session_id: str
 ```
 
@@ -356,6 +455,7 @@ class SearchQuality(BaseModel):
 class AttractionSearchResult(BaseModel):
     attractions: list[Attraction] = Field(default_factory=list)
     search_keywords: list[str] = Field(default_factory=list)
+    step_observations: list[str] = Field(default_factory=list)
     quality: SearchQuality | None = None
 ```
 
@@ -363,10 +463,20 @@ class AttractionSearchResult(BaseModel):
 
 ```python
 class HotelSearchResult(BaseModel):
-    hotels: list[Hotel] = Field(default_factory=list)
+    selected_hotel: Hotel | None = Field(default=None)
+    candidate_hotels: list[Hotel] = Field(default_factory=list)
     search_areas: list[str] = Field(default_factory=list)
+    ranking_reasons: list[str] = Field(default_factory=list)
+    step_observations: list[str] = Field(default_factory=list)
     quality: SearchQuality | None = None
 ```
+
+Design notes:
+
+- `candidate_hotels` means qualified POI candidates, not confirmed available rooms.
+- True date-range room availability requires a future booking/availability tool.
+- `selected_hotel` is the top recommendation passed to the planner.
+- Other qualified candidates should stay in working memory/tool observations and only become long-term memory if `MemoryExtractionService` classifies them as useful semantic or episodic memories.
 
 ### MemoryCandidate
 
@@ -417,14 +527,18 @@ class TravelPlanState(TypedDict):
     context_packets: list[ContextPacket]
     planner_context: str
 
+    attraction_search_result: AttractionSearchResult
     attractions: list[Attraction]
     weather_info: list[WeatherInfo]
+    hotel_search_result: HotelSearchResult
     hotels: list[Hotel]
 
     trip_plan: TripPlan | None
     validation_errors: list[str]
     retry_count: int
 ```
+
+`attractions` and `hotels` are convenience flattened views. The richer `attraction_search_result` and `hotel_search_result` fields preserve subgraph plans, step observations, selected hotel, candidate hotels, quality checks, and ranking reasons.
 
 ## Endpoint Contracts
 
@@ -476,6 +590,14 @@ Validation happens at four boundaries:
 2. Tool normalization: provider responses are converted into `Attraction`, `Hotel`, and `WeatherInfo`.
 3. Planner output: `PlannerNode` output is parsed as `TripPlan`.
 4. Final response: `ValidateTripPlanNode` checks structure before returning to frontend.
+
+`ValidateTripPlanNode` should also enforce the day-centric contract:
+
+- Each day contains exactly one `breakfast`, one `lunch`, and one `dinner`.
+- Each day has `total_price >= 0`.
+- Each day owns its own `map_points`.
+- No top-level `budget` or top-level `map_points` field is required in the response.
+- Provider-returned text fields such as `city`, `name`, `address`, and `description` are preserved as-is.
 
 If planner validation fails, the graph routes back to `PlannerNode` for repair until retry limit is reached.
 

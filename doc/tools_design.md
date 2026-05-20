@@ -2,7 +2,7 @@
 
 This document describes the external tool integration design for the travel planning assistant.
 
-The agents workflow depends on external services for location search, weather, and optional attraction images. These services should be wrapped behind clear tool/service boundaries so graph nodes do not need to know provider-specific API details.
+The agents workflow depends on external services for location search and weather. These services should be wrapped behind clear tool/service boundaries so graph nodes do not need to know provider-specific API details.
 
 ## Background
 
@@ -10,7 +10,7 @@ The travel planner needs external data:
 
 - Attractions and hotels from Amap POI search
 - Weather from Amap weather tools
-- Optional attraction images from Unsplash or another image provider
+- Deferred attraction images from Unsplash or another image provider
 
 External providers return inconsistent data shapes. For example, Amap may return coordinates as a string like `"116.397128,39.916527"`, while other providers may use `lng`, `lon`, `longitude`, or nested coordinate fields.
 
@@ -20,13 +20,13 @@ The tool layer is responsible for hiding those provider differences and returnin
 
 Use MCP for Amap tools.
 
-Use a direct service wrapper for Unsplash image enrichment.
+Defer direct service wrappers for Unsplash image enrichment.
 
 Reasoning:
 
 - Amap tools are interactive search/query tools used by graph subgraphs.
 - Amap provides several related capabilities, so one shared MCP server is useful.
-- Unsplash image lookup is a simple enrichment step and does not require agent decision-making for the MVP.
+- Unsplash image lookup is deferred for the MVP. Schema slots can remain nullable for future enrichment.
 
 ## Amap MCP Integration
 
@@ -109,7 +109,8 @@ MVP usage:
 
 - Attraction and hotel search use `amap_maps_text_search`.
 - Weather uses `amap_maps_weather`.
-- Search detail, around search, directions, geocode, and regeocode are available for later route refinement, distance checks, and richer POI normalization.
+- Search detail, around search, geocode, and regeocode are available to specialist subgraphs for step-level search refinement, radius expansion, parking checks, approximate coordinate-distance checks, and richer POI normalization.
+- Direction tools may be used for lightweight route summary signals such as distance, estimated time, and transport mode. Full route instructions are deferred for the MVP.
 
 ### Attraction Search
 
@@ -121,6 +122,12 @@ Tool:
 
 ```text
 amap_maps_text_search
+amap_maps_search_detail
+amap_maps_around_search
+amap_maps_geocode
+amap_maps_direction_walking_by_address
+amap_maps_direction_driving_by_address
+amap_maps_direction_transit_integrated_by_address
 ```
 
 Inputs:
@@ -135,16 +142,19 @@ Output:
 Normalization target:
 
 ```python
-list[Attraction]
+AttractionSearchResult
 ```
 
 The subgraph should never pass raw provider responses directly to `PlannerNode`. It should normalize, deduplicate, rank, and return Pydantic-compatible attraction candidates.
+
+The attraction subgraph is a local Plan-and-Solve workflow. Its per-step ReAct executor may call restricted Amap tools, then a step evaluator decides whether the results are good enough or whether the subgraph should retry with alternate keywords, nearby anchors, or expanded search scope.
 
 Optional refinements:
 
 - `amap_maps_search_detail` can enrich selected POIs.
 - `amap_maps_around_search` can find nearby attractions or restaurants once a location is known.
 - `amap_maps_geocode` can convert addresses to coordinates if POI search lacks usable coordinates.
+- Direction tools can estimate lightweight distance/time/mode between candidate attractions or from hotel anchors, but should not return step-by-step route instructions.
 
 ### Weather Query
 
@@ -184,6 +194,11 @@ Tool:
 
 ```text
 amap_maps_text_search
+amap_maps_around_search
+amap_maps_geocode
+amap_maps_direction_walking_by_address
+amap_maps_direction_driving_by_address
+amap_maps_direction_transit_integrated_by_address
 ```
 
 Inputs:
@@ -201,30 +216,56 @@ Example keyword strategies:
 Normalization target:
 
 ```python
-list[Hotel]
+HotelSearchResult
 ```
 
-The hotel subgraph should evaluate distance, price, rating, and suitability before returning final hotel candidates.
+The hotel subgraph should evaluate distance, price, rating, hotel level, transportation convenience, and parking suitability before returning final hotel candidates.
+
+The hotel subgraph is a local Plan-and-Solve workflow. Its task planner chooses hotel search anchors such as attraction clusters, dinner areas, transit hubs, business districts, or parking-convenient areas. Its ReAct executor calls restricted Amap POI/geocode/direction tools, then a step evaluator validates candidate count, distance/time quality, price/rating fit, and parking checks for driving trips.
+
+Important limitation:
+
+- Amap POI tools can discover hotel candidates and nearby parking, but they do not guarantee room availability for a date range.
+- Until a booking/availability provider is added, the output should be treated as `candidate_hotels`, not confirmed available rooms.
 
 Optional refinements:
 
 - `amap_maps_around_search` can search near selected attraction clusters.
-- `amap_maps_direction_transit_integrated_by_address` can estimate public transit suitability.
-- `amap_maps_direction_walking_by_address` can estimate walkability around a hotel area.
+- `amap_maps_around_search` can search for nearby parking lots when the trip uses driving.
+- Direction tools can estimate public transit suitability, walkability, and driving convenience as summary signals.
+- Direction tool outputs should be reduced to distance, estimated duration, and transport mode. Do not expose detailed route steps such as bus line, station count, turn-by-turn walking, or driving instructions in the MVP response.
 
-### Route and Geocoding Tools
+### Route Summary and Geocoding Tools
 
-Route planning and geocoding tools are part of the Amap MCP server but are deferred for the first backend MVP.
+Route and geocoding tools are part of the Amap MCP server. The MVP may use them for route summary signals, but full route planning instructions are deferred.
 
-They should be considered when implementing:
+OCR source table confirms the available Amap MCP route/geocoding tools:
 
-- route distance and duration
-- map polyline display
-- hotel-to-attraction distance checks
+```text
+amap_maps_direction_walking_by_address
+amap_maps_direction_driving_by_address
+amap_maps_direction_transit_integrated_by_address
+amap_maps_geocode
+amap_maps_regeocode
+```
+
+Allowed MVP use:
+
+- distance radius checks
+- estimated travel duration
+- transport mode comparison
+- hotel-to-attraction travel-time checks
 - transit-oriented hotel selection
 - address normalization
 
-Until then, the graph can return `route_distance_km = None` and `route_duration_minutes = None` where route data is unavailable.
+Deferred:
+
+- map polyline display
+- detailed bus/subway line instructions
+- station counts
+- turn-by-turn walking or driving instructions
+
+If summary route data is unavailable, the graph should keep route slots nullable and return `route_distance_km = None` and `route_duration_minutes = None`.
 
 ## Provider Response Normalization
 
@@ -282,19 +323,19 @@ Attraction.image_url
 
 If no image is available, keep `image_url = None`.
 
-## Unsplash Image Service
+## Deferred Unsplash Image Service
 
-Unsplash is an optional enrichment service.
+Unsplash/photo enrichment is deferred for the MVP.
 
-It should not be exposed as a planner tool in the MVP.
+It should not be exposed as a planner tool or called during terminal-first backend testing.
 
 Reason:
 
 - The planner does not need to decide whether images are required.
-- Image lookup can be a simple post-processing/enrichment step.
 - Keeping it outside the graph reduces LLM/tool complexity.
+- `Attraction.image_url` can remain as a nullable future slot.
 
-Recommended wrapper:
+Future wrapper:
 
 ```python
 class UnsplashService:
@@ -305,16 +346,16 @@ class UnsplashService:
         ...
 ```
 
-Usage:
+Future usage:
 
 ```text
 TripPlan generated
   -> for each attraction without image_url
-  -> search image by "{attraction.name} {trip_plan.city}"
+  -> search image by "{attraction.name} {attraction.city or day.city}"
   -> set image_url if found
 ```
 
-For terminal-first backend testing, image enrichment can be optional and disabled by config.
+For terminal-first backend testing, image enrichment should be disabled/deferred.
 
 ## Graph Integration
 
@@ -322,20 +363,24 @@ The tools layer is consumed by graph nodes/subgraphs:
 
 ```text
 AttractionSearchSubgraph
-  -> Amap text search
-  -> normalize raw POIs to Attraction
+  -> local task planner
+  -> per-step ReAct executor with restricted Amap POI/detail/around/geocode tools
+  -> step evaluator and bounded retry/replan
+  -> normalize raw POIs to AttractionSearchResult
 
 WeatherQueryNode
   -> Amap weather
   -> normalize raw weather to WeatherInfo
 
 HotelSearchSubgraph
-  -> Amap text search
-  -> normalize raw POIs to Hotel
+  -> local task planner
+  -> per-step ReAct executor with restricted Amap POI/around/geocode/direction-summary tools
+  -> step evaluator and bounded retry/replan
+  -> normalize raw POIs to HotelSearchResult
 
-Optional post-processing
+Deferred post-processing
   -> UnsplashService
-  -> enrich Attraction.image_url
+  -> enrich Attraction.image_url later
 ```
 
 Specialist subgraphs should use restricted tool access:
@@ -354,7 +399,7 @@ Recommended behavior:
 
 - Amap POI failure -> return empty candidates and record tool observation.
 - Weather failure -> continue with empty weather and note missing weather.
-- Unsplash failure -> leave `image_url = None`.
+- Photo enrichment deferred -> leave `image_url = None`.
 - Repeated tool failure in a required step -> surface structured error or fallback plan.
 
 Tool observations should be summarized before being written to working memory:
@@ -407,6 +452,7 @@ POST /api/trip/plan
 
 Not required for MVP:
 
+- Calling Unsplash/photo enrichment in MVP.
 - Exposing Unsplash as an LLM-callable tool.
 - Route planning tools.
 - Multi-provider image search.
@@ -416,4 +462,4 @@ Not required for MVP:
 
 ## Summary
 
-Amap should be integrated through one shared MCP server instance and consumed by the relevant LangGraph nodes/subgraphs. The tool layer should normalize provider responses into Pydantic-compatible domain models before data reaches `PlannerNode`. Unsplash image search should remain a simple optional enrichment service for MVP, not an agent tool.
+Amap should be integrated through one shared MCP server instance and consumed by the relevant LangGraph nodes/subgraphs. The tool layer should normalize provider responses into Pydantic-compatible domain models before data reaches `PlannerNode`. Photo enrichment and full route instructions are deferred for the MVP, while lightweight route summary signals may be used for ranking and planning support.

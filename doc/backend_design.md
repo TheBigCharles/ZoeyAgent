@@ -1,4 +1,4 @@
-# Backend Design
+﻿# Backend Design
 
 This document describes the backend service design for the travel planning assistant.
 
@@ -13,7 +13,7 @@ The system already has three design layers:
 - `schemas_design.md`: Pydantic data contracts
 - `agents_design.md`: LangGraph travel-planning workflow
 - `memory_design.md`: working, semantic, and episodic memory design
-- `tools_design.md`: Amap MCP and optional Unsplash tool/service integration
+- `tools_design.md`: Amap MCP integration, with photo enrichment deferred and route summaries allowed
 
 The backend layer connects those designs into a running service.
 
@@ -177,7 +177,7 @@ On app startup:
 3. Initialize `PostgresStore` with embedding index config.
 4. Initialize `InMemorySaver`.
 5. Initialize shared Amap MCP tool/server integration.
-6. Initialize optional image enrichment service if enabled.
+6. Skip photo enrichment for the MVP; keep nullable image slots for future use.
 7. Build and compile `TravelPlannerGraph`.
 8. Register API routers.
 
@@ -226,7 +226,8 @@ Backend validation:
 
 - `session_id` must be present.
 - Date range must be valid.
-- `city` must be non-empty.
+- `cities` must be a non-empty list of valid strings.
+- Preference indexes must match supported enum values.
 - Budget, if provided, must be non-negative.
 
 Flow:
@@ -245,6 +246,13 @@ Output:
 ```python
 TripPlan
 ```
+
+Response contract:
+
+- `TripPlan.days[*]` is the primary rendering unit.
+- Each day owns its `meals`, `map_points`, and `total_price`.
+- Top-level `budget` and top-level `map_points` are not part of the response contract.
+- Provider-returned text fields such as `city`, `name`, `address`, and `description` are returned as-is.
 
 Failure behavior:
 
@@ -279,7 +287,7 @@ For MVP:
 Future use:
 
 - Accept edited `TripPlan`.
-- Recalculate budget.
+- Recalculate per-day price totals.
 - Recalculate route or map points.
 - Apply local reorder/delete edits.
 - Optionally trigger partial replanning.
@@ -427,19 +435,61 @@ curl http://localhost:8000/health
 
 ### Plan Trip
 
+Current request shape:
+
+```json
+{
+  "user_id": "user_terminal_001",
+  "session_id": "trip_session_terminal_001",
+  "cities": ["北京"],
+  "start_date": "2026-06-10",
+  "end_date": "2026-06-12",
+  "preferences": {
+    "transport_preference": 0,
+    "accommodation_preference": [0],
+    "attraction_preference": [0, 1]
+  },
+  "budget": 3000,
+  "extra_requirements": "不要安排太赶"
+}
+```
+
+Preference indexes:
+
+```text
+transport_preference:
+  0 = public_transport
+  1 = driving
+
+accommodation_preference:
+  0 = budget_hotel
+  1 = mid_level_hotel
+  2 = five_star_hotel
+
+attraction_preference:
+  0 = history_culture
+  1 = nature
+  2 = food
+  3 = shopping
+  4 = art
+  5 = leisure
+```
+
 ```bash
 curl -X POST http://localhost:8000/api/trip/plan \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "user_terminal_001",
     "session_id": "trip_session_terminal_001",
-    "city": "北京",
+    "cities": ["北京"],
     "start_date": "2026-06-10",
     "end_date": "2026-06-12",
-    "preferences": ["历史文化", "自然风光"],
+    "preferences": {
+      "transport_preference": 0,
+      "accommodation_preference": [0],
+      "attraction_preference": [0, 1]
+    },
     "budget": 3000,
-    "transportation": "public_transit",
-    "accommodation": "economy",
     "extra_requirements": "不要安排太赶"
   }'
 ```
@@ -448,9 +498,14 @@ Expected:
 
 - Response is valid `TripPlan`.
 - `days` length matches date range.
+- Each `days[*].meals` contains exactly one `breakfast`, one `lunch`, and one `dinner`.
+- Each `days[*].total_price` is present and non-negative.
+- Each `days[*].map_points` is populated when that day's locations are available.
+- `Attraction.image_url` may be `null`; photo enrichment is deferred.
+- `route_distance_km`, `route_duration_minutes`, and `transit_method` may be populated as lightweight route summaries.
+- Full route instructions are not returned in MVP.
 - `weather_info` is populated if weather API succeeds.
-- `budget.total` is present.
-- `map_points` is populated when attraction locations are available.
+- No top-level `budget` or top-level `map_points` field is required; the frontend calculates trip total from `days[*].total_price`.
 - Semantic/episodic memories may be written after validation.
 
 ### Search Semantic Memory
@@ -482,3 +537,4 @@ Not part of the backend MVP:
 The backend is an async FastAPI service that wraps the LangGraph travel planner.
 
 The client must provide `session_id`; the backend uses it as LangGraph `thread_id` for working-memory checkpoints. Long-term semantic and episodic memory use `PostgresStore` with `pgvector` and `BAAI/bge-m3` embeddings. The MVP exposes one real planning endpoint, one reserved recalculation endpoint, health checks, and optional memory-inspection endpoints for terminal testing.
+

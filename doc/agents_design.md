@@ -8,12 +8,12 @@ The goal is to generate a complete, structured travel plan from a front-end form
 
 The product flow starts on a web page where the user enters:
 
-- Destination city
+- Destination cities
 - Travel dates
-- Travel preferences
+- Indexed travel preferences
 - Budget
 - Transportation preference
-- Accommodation type
+- Accommodation preference
 - Extra requirements
 
 After the user clicks "start planning", the backend receives this form as a structured request. The agents layer then gathers required information from external tools, uses memory for personalization, generates a travel plan, validates it, and returns a structured response that the front end can render.
@@ -21,15 +21,15 @@ After the user clicks "start planning", the backend receives this form as a stru
 The result page needs enough structured data to show:
 
 - Trip overview
-- Budget breakdown
-- Attraction map
+- Per-day price totals
+- Per-day attraction maps
 - Daily itinerary
 - Weather information
 - Hotel recommendation
 - Meal suggestions
 - Editable attraction cards
 
-The agents layer should therefore not return loose prose. It should return a validated `TripPlan` object.
+The agents layer should therefore not return loose prose. It should return a validated, day-centric `TripPlan` object.
 
 External provider access is defined in `tools_design.md`. The agents layer should consume normalized tool results, not raw Amap or Unsplash provider responses.
 
@@ -92,7 +92,7 @@ The hotel node needs:
 
 For that reason, `HotelSearchSubgraph` runs after `AttractionSearchSubgraph`, rather than fully in parallel with it.
 
-Weather lookup can still run in parallel with attraction search because it only depends on city and dates.
+Weather lookup can still run in parallel with attraction search because it only depends on destination cities and dates.
 
 ## State Design
 
@@ -116,14 +116,18 @@ class TravelPlanState(TypedDict):
     context_packets: list[ContextPacket]
     planner_context: str
 
+    attraction_search_result: AttractionSearchResult
     attractions: list[Attraction]
     weather_info: list[WeatherInfo]
+    hotel_search_result: HotelSearchResult
     hotels: list[Hotel]
 
     trip_plan: TripPlan | None
     validation_errors: list[str]
     retry_count: int
 ```
+
+`attractions` and `hotels` are convenience flattened views derived from the richer subgraph results. The richer `AttractionSearchResult` and `HotelSearchResult` preserve step observations, quality checks, selected hotel, candidate hotels, and ranking reasons.
 
 ## Pydantic Role
 
@@ -142,11 +146,10 @@ Important models:
 - `Hotel`
 - `Meal`
 - `WeatherInfo`
-- `Budget`
 - `DayPlan`
 - `TripPlan`
 
-The front end and backend should share the same conceptual data shape. The backend returns a validated `TripPlan`, and the front end renders that directly into overview cards, maps, daily itinerary sections, weather blocks, and budget summaries.
+The front end and backend should share the same conceptual data shape. The backend returns a validated `TripPlan`, and the front end renders that directly into overview cards, per-day maps, daily itinerary sections, weather blocks, and per-day price totals.
 
 ## Node Responsibilities
 
@@ -188,9 +191,12 @@ Output:
 Responsibilities:
 
 - Validate date range and trip length.
-- Normalize budget, preferences, accommodation type, and transportation type.
+- Normalize budget and convert frontend enum indexes into English enum values for transportation, accommodation, and attraction preferences.
+- Validate `cities` as a non-empty list of city strings.
 - Merge explicit request fields with known user preferences.
 - Identify missing or ambiguous planning inputs.
+- Preserve long `extra_requirements`, but provide shorter task-specific excerpts to local subgraphs when possible.
+- Preserve provider-returned text fields such as `city`, `name`, `address`, and `description` as-is.
 
 ### WorkingMemoryMaintenanceNode
 
@@ -236,44 +242,103 @@ This makes working memory maintenance a reusable helper policy rather than a pla
 
 ### AttractionSearchSubgraph
 
-Purpose: find suitable attractions.
+Purpose: find suitable attractions through a local Plan-and-Solve workflow.
 
 Input:
 
-- City
-- Preferences
+- Cities
+- Attraction preferences
 - Extra requirements
 - Trip length
 
 Output:
 
-- `list[Attraction]`
+- `AttractionSearchResult`
 
 Responsibilities:
 
-- Generate POI search keywords from preferences.
-- Call Amap POI search through the shared Amap MCP tool defined in `tools_design.md`.
-- Evaluate whether results are sufficient.
-- Retry with alternate keywords when results are too few or too weak.
-- Merge, deduplicate, and rank attractions.
+- Create a local attraction-search plan before calling tools.
+- Break attraction search into smaller tasks such as keyword generation, POI search, nearby expansion, detail enrichment, quality evaluation, and ranking.
+- Use bounded ReAct executors for tool-heavy subtasks.
+- Call Amap POI/search-detail/around-search tools through the shared Amap MCP integration defined in `tools_design.md`.
+- Evaluate each step before moving forward.
+- Replan with alternate keywords, nearby anchors, or wider search scope when results are too few or too weak.
+- Merge, deduplicate, and rank attraction candidates.
+- Return normalized `Attraction` candidates and a summarized observation to `TravelPlanState`.
 
-Example internal loop:
+Internal workflow:
 
 ```text
-Build keyword
--> Search Amap POI
--> Evaluate result count and quality
--> Retry with alternate keyword if needed
--> Merge and rank
+AttractionTaskPlannerNode
+  -> AttractionReActStepExecutorNode
+  -> AttractionStepEvaluatorNode
+  -> if invalid: replan/refine and retry
+  -> if valid and more steps: execute next step
+  -> AttractionRankerNode
+  -> AttractionSearchResult
 ```
 
-This subgraph can behave like a controlled ReAct-style search loop, but with explicit retry limits and quality rules.
+Diagram:
+
+```mermaid
+flowchart TD
+    AStart["AttractionSearchSubgraph input"] --> APlan["AttractionTaskPlannerNode"]
+    APlan --> AStep["Select next attraction search step"]
+    AStep --> AExec["AttractionReActStepExecutorNode"]
+    AExec --> ATool["Restricted Amap tools"]
+    ATool --> ANorm["Normalize partial POI results"]
+    ANorm --> AEval["AttractionStepEvaluatorNode"]
+    AEval --> AValid{"Step valid?"}
+    AValid -->|No| ARepair["Refine keywords anchors or scope"]
+    ARepair --> AExec
+    AValid -->|Yes| AMore{"More planned steps?"}
+    AMore -->|Yes| AStep
+    AMore -->|No| ARank["AttractionRankerNode"]
+    ARank --> AResult["AttractionSearchResult"]
+    AResult --> AState["Write summarized observation to TravelPlanState"]
+
+    classDef plan fill:#ffe3e3,stroke:#c92a2a,color:#222;
+    classDef exec fill:#ffe8cc,stroke:#d9480f,color:#222;
+    classDef eval fill:#e5dbff,stroke:#5f3dc4,color:#222;
+    classDef output fill:#c5f6fa,stroke:#0c8599,color:#222;
+    classDef state fill:#fff4e6,stroke:#e67700,color:#222;
+
+    class APlan,AStep,ARepair plan;
+    class AExec,ATool,ANorm exec;
+    class AEval,AValid,AMore eval;
+    class ARank,AResult output;
+    class AState state;
+```
+
+Example local plan:
+
+```text
+1. Convert user attraction preferences into English enum intent and provider search keywords.
+2. Search primary POIs for each city.
+3. If result quality is low, retry with alternate keywords such as museums, historic sites, parks, food streets, shopping districts, art districts, or leisure areas.
+4. Enrich important candidates with POI detail or around-search when useful.
+5. Rank by preference match, location completeness, rating, estimated visit value, and itinerary diversity.
+```
+
+Each executable step can use a controlled ReAct loop:
+
+```text
+Plan step
+  -> choose restricted Amap tool
+  -> call tool
+  -> observe result
+  -> normalize partial output
+  -> evaluate step validity
+  -> retry/replan within max retries when invalid
+```
+
+This subgraph is agentic inside a narrow boundary. It can plan, execute, evaluate, and replan locally, but it does not own the final itinerary or write long-term memory directly.
 
 Local context:
 
 `AttractionSearchSubgraph` should use a local prompt/context scope, not the full planner context. It can receive only:
 
-- City
+- Cities or the current city being searched
 - Preferences
 - Extra requirements
 - Relevant attraction-related semantic memories
@@ -289,7 +354,7 @@ Purpose: get weather for the trip dates.
 
 Input:
 
-- City
+- Cities
 - Start date
 - End date
 
@@ -300,50 +365,122 @@ Output:
 Responsibilities:
 
 - Call the Amap weather tool through the shared Amap MCP integration defined in `tools_design.md`.
-- Normalize API response into `WeatherInfo`.
+- Query weather per destination city when the request contains multiple cities.
+- Normalize API response into `WeatherInfo`, including the city for each weather record.
 - Convert temperature strings into integers when needed.
 
 This node does not need an LLM or ReAct loop.
 
 ### HotelSearchSubgraph
 
-Purpose: find suitable hotels.
+Purpose: find suitable hotels through a local Plan-and-Solve workflow.
 
 Input:
 
-- City
-- Accommodation preference
+- Cities
+- Accommodation preferences
 - Budget
 - Transportation preference
 - Attractions
 
 Output:
 
-- `list[Hotel]`
+- `HotelSearchResult`
 
 Responsibilities:
 
-- Search hotels using Amap POI through the shared Amap MCP tool defined in `tools_design.md`.
-- Prefer areas close to major attraction clusters.
-- Filter by distance, price, and rating when available.
-- Retry using alternate areas such as attraction names, business districts, or transit hubs.
-- Merge, deduplicate, and rank hotel candidates.
+- Create a local hotel-search plan before calling tools.
+- Search around itinerary anchors such as selected attractions, dinner areas, transport-convenient spots, business districts, or transit hubs.
+- Use Amap tools through the shared Amap MCP integration.
+- Filter and rank by distance, price, rating, hotel level, transportation convenience, and parking suitability.
+- Use lightweight direction-tool summaries when useful: distance, estimated time, and transport mode only.
+- Treat parking as high-priority when `transport_preference = driving`; check hotel parking evidence or nearby parking lots when possible.
+- Check whether the hotel can logically fit the itinerary stay period. True availability requires a future booking provider; Amap POI alone should produce `candidate_hotels`, not guaranteed available rooms.
+- Recommend a top hotel while preserving other qualified candidates in working memory / tool observations.
+- Return normalized hotel candidates, selected hotel, ranking reasons, and a summarized observation to `TravelPlanState`.
 
-Example internal loop:
+Internal workflow:
 
 ```text
-Search hotels
--> Evaluate distance, price, rating
--> Refine area if hotels are too far or too weak
--> Search again
--> Merge and rank
+HotelTaskPlannerNode
+  -> HotelReActStepExecutorNode
+  -> HotelStepEvaluatorNode
+  -> if invalid: replan/refine and retry
+  -> if valid and more steps: execute next step
+  -> HotelRankerNode
+  -> HotelMemoryCandidateNode
+  -> HotelSearchResult
+```
+
+Diagram:
+
+```mermaid
+flowchart TD
+    HStart["HotelSearchSubgraph input"] --> HPlan["HotelTaskPlannerNode"]
+    HPlan --> HAnchor["Choose search anchor"]
+    HAnchor --> HExec["HotelReActStepExecutorNode"]
+    HExec --> HTools["Restricted Amap tools"]
+    HTools --> HNorm["Normalize hotel candidates"]
+    HNorm --> HEval["HotelStepEvaluatorNode"]
+    HEval --> HValid{"Step valid?"}
+    HValid -->|No| HRepair["Increase radius switch anchor or add keyword"]
+    HRepair --> HExec
+    HValid -->|Yes| HMore{"More planned steps?"}
+    HMore -->|Yes| HAnchor
+    HMore -->|No| HRank["HotelRankerNode"]
+    HRank --> HMemory["HotelMemoryCandidateNode"]
+    HMemory --> HResult["HotelSearchResult"]
+    HResult --> HState["Write selected hotel candidates and observations to TravelPlanState"]
+
+    classDef plan fill:#ffe3e3,stroke:#c92a2a,color:#222;
+    classDef exec fill:#ffe8cc,stroke:#d9480f,color:#222;
+    classDef eval fill:#e5dbff,stroke:#5f3dc4,color:#222;
+    classDef memory fill:#fff4e6,stroke:#e67700,color:#222;
+    classDef output fill:#c5f6fa,stroke:#0c8599,color:#222;
+
+    class HPlan,HAnchor,HRepair plan;
+    class HExec,HTools,HNorm exec;
+    class HEval,HValid,HMore eval;
+    class HMemory,HState memory;
+    class HRank,HResult output;
+```
+
+Example local plan:
+
+```text
+1. Choose hotel search anchors from attractions, dinner areas, or transport-convenient areas.
+2. Search hotels near anchors and aim for about 10 viable candidates per relevant city/area.
+3. Score candidates by distance, estimated travel time, transport mode, price, rating, hotel level, transit convenience, and parking suitability.
+4. Check whether the stay date range fits the itinerary structure. If a real availability API is absent, mark candidates as POI candidates rather than confirmed availability.
+5. Select top 1 hotel for planning and keep other qualified candidates as working-memory/tool-observation candidates.
+```
+
+Example step-level ReAct/evaluator loop for hotel radius search:
+
+```text
+Executor:
+  -> use geocode / known attraction coordinates
+  -> choose search radius
+  -> call around-search or text-search
+  -> optionally call direction tool for summary distance time and mode
+  -> normalize hotels
+
+Evaluator:
+  -> valid if enough hotels, locations are present, distance is computable, and required driving/parking checks were attempted
+  -> invalid if too few candidates, hotels are too far, parking evidence is missing for driving trips, or candidate data is too sparse
+
+Repair:
+  -> increase radius
+  -> switch anchor
+  -> add business district / transit hub keyword
+  -> retry within max retries
 ```
 
 Local context:
 
 `HotelSearchSubgraph` should use a local prompt/context scope. It can receive only:
 
-- City
+- Cities or the current city/area being searched
 - Accommodation preference
 - Budget
 - Transportation preference
@@ -354,27 +491,53 @@ Local context:
 
 It should not receive full conversation history, full attraction descriptions, meal suggestions, or the full TripPlan schema.
 
+Memory policy:
+
+- Keep selected hotel and candidate hotels in working memory / tool observations for the current graph run.
+- Do not write every hotel candidate directly to semantic or episodic memory.
+- Long-term memory writes happen through `MemoryExtractionService`, usually after successful validation in `SaveMemoryNode`.
+- Semantic memory is appropriate for stable preferences such as "user prefers hotels with parking".
+- Episodic memory is appropriate for confirmed or rejected trip decisions such as "for this Beijing trip, hotel A was selected and hotel B was rejected".
+
 ## Specialist Subgraph Pattern
 
-`AttractionSearchSubgraph` and `HotelSearchSubgraph` should be treated as controlled ReAct-style specialist subgraphs, not as fully independent open-ended agents.
+`AttractionSearchSubgraph` and `HotelSearchSubgraph` should be treated as local Plan-and-Solve specialist subgraphs. They are not fully independent open-ended agents, but they are allowed to plan, execute, evaluate, and repair their own narrow search tasks.
 
 Shared pattern:
 
 ```text
 SpecialistSearchSubgraph
   -> local input schema
-  -> local prompt builder
+  -> local task planner
   -> restricted tool set
-  -> local result evaluator
-  -> retry/refine loop
+  -> per-step ReAct executor
+  -> per-step evaluator
+  -> bounded retry/replan loop
   -> rank/deduplicate
+  -> memory candidate preparation for working memory
   -> Pydantic output schema
   -> summarized observation back to TravelPlanState
 ```
 
-The main graph remains the Plan-and-Solve controller. Specialist subgraphs are allowed to reason iteratively within their narrow domain, but they should not own global planning or memory writes.
+The main graph remains the global Plan-and-Solve controller. Specialist subgraphs are allowed to reason iteratively within their narrow domain, but they should not own final itinerary synthesis or direct long-term memory writes.
 
 Implementation can use shared helper/factory functions instead of class inheritance. The important part is shared behavior and contracts, not Python inheritance.
+
+Recommended internal state for each specialist subgraph:
+
+```text
+local_goal
+local_plan
+current_step
+step_attempts
+tool_observations
+partial_candidates
+quality_checks
+retry_count
+final_result
+```
+
+Each subgraph should have explicit max retry limits. If a step cannot be made valid, the subgraph should return the best available candidates plus structured quality warnings instead of blocking the whole trip planner indefinitely.
 
 ### ContextAssemblyNode
 
@@ -383,7 +546,7 @@ Purpose: build the optimized planner context immediately before `PlannerNode`.
 Input:
 
 - `TripPlanRequest`
-- `NormalizedTripRequest`
+- `NormalizedTripRequest`, including original city strings and English preference enum values
 - Working memory
 - Trip draft
 - Tool observations
@@ -449,9 +612,9 @@ Input:
 - `NormalizedTripRequest`
 - `semantic_memories`
 - `episodic_memories`
-- `list[Attraction]`
+- `AttractionSearchResult`
 - `list[WeatherInfo]`
-- `list[Hotel]`
+- `HotelSearchResult`
 - `planner_context`
 
 Output:
@@ -463,6 +626,12 @@ Responsibilities:
 - Arrange attractions across days.
 - Consider weather, pace, transportation, budget, and user preferences.
 - Include hotel and meal suggestions.
+- Generate exactly three meal objects for each day: one `breakfast`, one `lunch`, and one `dinner`.
+- Place map markers in `DayPlan.map_points`, derived from that day's attractions, hotel, and meals when coordinates are available.
+- Leave `Attraction.image_url` unset unless a future photo enrichment service is enabled; photo links are deferred for MVP day-trip output.
+- Use route summary fields such as `route_distance_km`, `route_duration_minutes`, and `transit_method` when available from subgraph summaries.
+- Do not return full route instructions such as bus line, station count, transfer detail, or turn-by-turn directions.
+- Compute `DayPlan.total_price` for each day. The frontend calculates trip-level total by summing daily totals.
 - Generate daily descriptions and overall suggestions.
 - Return structured output matching the `TripPlan` schema.
 - Use the structured `planner_context` assembled by `ContextAssemblyNode`.
@@ -485,7 +654,12 @@ Responsibilities:
 
 - Validate the LLM output with Pydantic.
 - Ensure required fields are present.
-- Ensure dates, days, weather entries, budget fields, and nested models are coherent.
+- Ensure dates, days, weather entries, daily map points, daily totals, and nested models are coherent.
+- Ensure every day contains exactly one `breakfast`, one `lunch`, and one `dinner`.
+- Ensure every day has `total_price >= 0`.
+- Do not require top-level `budget` or top-level `map_points`; these are intentionally not part of the response contract.
+- Ensure enum-like schema fields use English values.
+- Ensure provider-returned text fields are not translated or normalized away.
 - Route back to `PlannerNode` for repair if validation fails and retry count is below the limit.
 
 ### SaveMemoryNode
@@ -587,7 +761,7 @@ async def recalculate_trip_plan(
 Expected future use:
 
 - Accept a user-edited `TripPlan`.
-- Recalculate budget.
+- Recalculate per-day price totals.
 - Recalculate map route or ordering.
 - Apply local changes after the user deletes or reorders attractions.
 - Optionally trigger partial replanning later.
