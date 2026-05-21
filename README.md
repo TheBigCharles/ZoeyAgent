@@ -17,7 +17,7 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 flowchart TB
     client["客户端或终端测试"] --> api["FastAPI 后端"]
     api --> schema["Pydantic 请求校验"]
-    schema --> graph["TravelPlannerGraph"]
+    schema --> travelPlannerGraph["TravelPlannerGraph"]
 
     subgraph app["应用层"]
         health["GET /health"]
@@ -72,8 +72,10 @@ flowchart TB
         store --> embedding
     end
 
-    api --> app
-    graph --> init
+    api --> health
+    api --> planApi
+    api --> memoryApi
+    travelPlannerGraph --> init
     init --> working
     loadMemory --> store
     attraction --> amapClient
