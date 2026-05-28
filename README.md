@@ -101,6 +101,7 @@ flowchart TB
 
 2. 实现 Pydantic 数据契约
    - 按 `doc/schemas_design.md` 实现 `TripPlanRequest`、`TripPlan`、`DayPlan`、`Attraction`、`Hotel`、`Meal`、`WeatherInfo` 等模型。
+   - 将模型按边界拆分到 `models/trip.py`、`models/domain.py`、`models/graph.py`、`models/memory.py`，避免后续阶段在一个大文件里堆叠。
    - 加入日期、城市、预算、枚举索引和每日餐食数量校验。
    - 这一阶段只增加 schema 能力，不引入真实 LLM 或外部工具依赖。
    - 验证方式：为请求模型、响应模型和关键 validator 添加单元测试。

@@ -3,20 +3,22 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from app.models.trip import (
-    AccommodationPreference,
+from app.models.domain import (
     Attraction,
-    AttractionPreference,
     DayPlan,
     Hotel,
     Location,
     Meal,
     MapPoint,
+    WeatherInfo,
+)
+from app.models.trip import (
+    AccommodationPreference,
+    AttractionPreference,
     TransportPreference,
     TripPlan,
     TripPlanRequest,
     TripPreferencesInput,
-    WeatherInfo,
 )
 
 
