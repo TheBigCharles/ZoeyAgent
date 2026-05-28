@@ -26,10 +26,11 @@ Equivalent request shape:
     "accommodation_preference": [0],
     "attraction_preference": [1, 3]
   },
-  "extra_requirements": "早上11点开始行程，晚上10点结束行程",
-  "session_id": "frontend_generated_session_id"
+  "extra_requirements": "早上11点开始行程，晚上10点结束行程"
 }
 ```
+
+For a first planning request, `session_id` may be omitted. The backend generates one and returns it in `TripPlan.session_id`. Later requests for the same planning session should include that returned `session_id`.
 
 Enum meaning:
 
@@ -57,6 +58,7 @@ Tools called:
 Expected output:
 
 - Empty `TravelPlanState` with the user request attached.
+- A resolved `session_id` exists before graph execution and is used as LangGraph `thread_id`.
 
 Memory:
 
@@ -566,6 +568,7 @@ The actual content depends on Amap tool results and PlannerNode generation. The 
 ```json
 {
   "cities": ["杭州"],
+  "session_id": "backend_or_frontend_resolved_session_id",
   "start_date": "2026-07-05",
   "end_date": "2026-07-08",
   "days": [

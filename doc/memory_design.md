@@ -69,7 +69,7 @@ It maintains the current session context inside LangGraph state, with `InMemoryS
 Recommended setup:
 
 - Working memory backend: LangGraph state + `InMemorySaver`
-- `thread_id`: `session_id` or `trip_session_id`
+- `thread_id`: resolved `session_id` or `trip_session_id`
 - TTL: handled at the app/session layer
 
 - Current session messages
@@ -91,12 +91,13 @@ Loading flow:
 
 ```text
 session_id / trip_session_id
-  -> used as LangGraph thread_id
+  -> backend resolves missing session_id by generating a new one
+  -> resolved value is used as LangGraph thread_id
   -> InMemorySaver restores the checkpointed TravelPlanState
   -> nodes read working_messages, trip_draft, and tool_observations directly from state
 ```
 
-The frontend or backend session layer must keep the `session_id` / `trip_session_id` and pass it back on later calls that belong to the same planning session.
+The first planning request may omit `session_id`. In that case, the backend returns the generated value in `TripPlan.session_id`. The frontend or backend session layer must keep the resolved `session_id` / `trip_session_id` and pass it back on later calls that belong to the same planning session.
 
 Example:
 

@@ -107,9 +107,10 @@ flowchart TB
 
 3. 打通最小 planning endpoint
    - 实现 `POST /api/trip/plan`。
-   - 要求客户端必须传入 `session_id`。
+   - 首次请求可以不传 `session_id`；后端生成新的 `session_id`，并在 `TripPlan.session_id` 中返回。
+   - 如果前端已经拿到 `session_id`，后续同一 planning session 必须继续传回该值。
    - 先返回一个固定或 mock 的合法 `TripPlan`，用于验证 API 合同和前端渲染合同。
-   - 验证方式：用 `curl` 提交最小合法请求，确认返回值能通过 `TripPlan` 校验。
+   - 验证方式：用 `curl` 提交不带 `session_id` 的最小合法请求，确认返回值能通过 `TripPlan` 校验且包含后端生成的 `session_id`。
 
 4. 建立 LangGraph 主流程
    - 创建 `TravelPlanState` 和最小 `TravelPlannerGraph`。
@@ -160,7 +161,7 @@ flowchart TB
     - 验证方式：构造缺餐、日期数量错误、价格为负等坏输出，确认 validator 能拒绝并触发 repair 或 fallback。
 
 12. 接入 working memory
-    - 使用 `InMemorySaver`，将 `session_id` 映射为 LangGraph `thread_id`。
+    - 使用 `InMemorySaver`，将解析后的 `session_id` 映射为 LangGraph `thread_id`。
     - 实现 `append_working_message` 和 `append_tool_observation` 这类状态更新 helper。
     - 保持 working memory 只服务当前进程和当前 session，不提前承诺持久化。
     - 验证方式：用相同 `session_id` 连续请求，确认进程存活期间 graph state 能被恢复。

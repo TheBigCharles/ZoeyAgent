@@ -164,7 +164,7 @@ class TripPlanRequest(BaseModel):
     preferences: TripPreferencesInput = Field(..., description="Indexed frontend preference selections")
     budget: int | None = Field(default=None, ge=0, description="Total budget")
     extra_requirements: str = Field(default="", description="Free-form user requirements; may be long")
-    session_id: str = Field(..., description="Client-generated planning session ID")
+    session_id: str | None = Field(default=None, description="Existing planning session ID, if available")
 
     @field_validator("cities")
     @classmethod
@@ -182,7 +182,9 @@ Design notes:
 - `preferences` is a structured object containing enum indexes from the frontend.
 - `transport_preference = 0` means `public_transport`, covering bus, train, subway, and taxi.
 - Preference enum indexes are converted into English enum values during normalization. Frontend display translation is not a backend concern.
-- `session_id` is required. The client/frontend generates it, and the backend uses it as the LangGraph `thread_id`.
+- `session_id` is optional on the first planning request. If it is missing, null, or blank, the backend generates a new one.
+- If the frontend already has a `session_id`, it must pass the same value for later requests in the same planning session.
+- The backend uses the resolved non-empty `session_id` as the LangGraph `thread_id`.
 - `extra_requirements` may be a very long string. It should be included in context assembly with token budgeting, not blindly expanded in every local subgraph prompt.
 
 ### TripPlan
@@ -193,6 +195,7 @@ It must contain everything the frontend needs to render the result page.
 
 ```python
 class TripPlan(BaseModel):
+    session_id: str = Field(..., description="Resolved planning session ID")
     cities: list[str] = Field(..., description="Destination cities")
     start_date: date = Field(..., description="Trip start date")
     end_date: date = Field(..., description="Trip end date")
@@ -205,6 +208,7 @@ class TripPlan(BaseModel):
 Design notes:
 
 - `TripPlan` is day-centric. It does not include top-level `budget` or top-level `map_points`.
+- `TripPlan.session_id` returns the resolved planning session ID so the frontend can reuse it on later requests.
 - The frontend calculates total trip price by summing `days[*].total_price`.
 - Each `DayPlan` owns its own `map_points` so the frontend can render per-day maps directly.
 - Because `cities` can contain multiple destinations, `DayPlan`, `WeatherInfo`, and map/POI-like records should include `city` so the frontend and planner can distinguish records across cities.
@@ -504,6 +508,7 @@ Design notes:
 `NormalizedTripRequest` is the cleaned version of `TripPlanRequest` used by graph nodes.
 Preference fields contain English enum values such as `public_transport`, `budget_hotel`, and `history_culture`.
 Provider text fields remain as returned by the provider.
+Its `session_id` is always the resolved non-empty session ID generated or accepted by the backend before graph execution.
 
 ```python
 class NormalizedTripRequest(BaseModel):
@@ -677,6 +682,7 @@ Validation happens at four boundaries:
 
 `ValidateTripPlanNode` should also enforce the day-centric contract:
 
+- `TripPlan.session_id` must be present and non-empty.
 - Each day contains exactly one `breakfast`, one `lunch`, and one `dinner`.
 - Each day has `total_price >= 0`.
 - Each day owns its own `map_points`.

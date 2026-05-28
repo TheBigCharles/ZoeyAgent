@@ -1,6 +1,6 @@
 """Application configuration loaded from environment variables.
 
-Use `.env` for local secrets and keep `.env.example` as the committed template.
+Use `.env` for local secrets.
 """
 
 from functools import lru_cache

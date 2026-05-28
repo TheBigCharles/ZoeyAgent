@@ -18,6 +18,8 @@ The product flow starts on a web page where the user enters:
 
 After the user clicks "start planning", the backend receives this form as a structured request. The agents layer then gathers required information from external tools, uses memory for personalization, generates a travel plan, validates it, and returns a structured response that the front end can render.
 
+The backend resolves the planning `session_id` before graph execution. If the first request omits it, the backend generates one; if it is present, the backend reuses it. The graph should always receive a non-empty resolved `session_id`, and the final `TripPlan` should return that same value.
+
 The result page needs enough structured data to show:
 
 - Trip overview
