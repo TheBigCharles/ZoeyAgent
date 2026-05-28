@@ -194,3 +194,4 @@ flowchart TB
 ## MVP 边界
 
 第一版不需要实现前端、图片 enrichment、真实酒店库存、完整路线说明、异步任务队列、SSE/WebSocket 进度推送、生产鉴权和完整 recalculation。MVP 的目标是先让后端能够稳定返回一个结构化、可验证、可渲染的 `TripPlan`。
+Zoey's trip planner agent
