@@ -199,109 +199,41 @@ erDiagram
 Graph 和 memory 内部合同：
 
 ```mermaid
-erDiagram
-    TRIP_PLAN_REQUEST ||--|| NORMALIZED_TRIP_REQUEST : normalizes_to
-    NORMALIZED_TRIP_REQUEST ||--|| TRAVEL_PLAN_STATE : enters
-    TRAVEL_PLAN_STATE ||--o{ CONTEXT_PACKET : carries
-    TRAVEL_PLAN_STATE ||--o| ATTRACTION_SEARCH_RESULT : stores
-    TRAVEL_PLAN_STATE ||--o| HOTEL_SEARCH_RESULT : stores
-    TRAVEL_PLAN_STATE ||--o{ MEMORY_CANDIDATE : extracts
-    TRAVEL_PLAN_STATE ||--o| TRIP_PLAN : returns
-    ATTRACTION_SEARCH_RESULT ||--o| SEARCH_QUALITY : evaluated_by
-    HOTEL_SEARCH_RESULT ||--o| SEARCH_QUALITY : evaluated_by
-    WORKING_MEMORY_MAINTENANCE_RESULT ||--o{ MEMORY_CANDIDATE : extracts
+flowchart TB
+    request["TripPlanRequest<br/>原始 API 输入<br/>user_id cities dates<br/>preferences budget<br/>extra_requirements<br/>session_id optional"]
+    session["SessionResolver<br/>如果缺失则生成 session_id<br/>如果存在则复用 session_id"]
+    normalize["NormalizeRequestNode<br/>清洗 cities<br/>计算 days_count<br/>枚举索引转英文值<br/>保留 budget 和 extra_requirements"]
+    normalized["NormalizedTripRequest<br/>graph 内部输入<br/>user_id cities dates<br/>days_count<br/>transport_preference<br/>accommodation_preferences<br/>attraction_preferences<br/>budget optional<br/>extra_requirements<br/>session_id required"]
 
-    TRIP_PLAN_REQUEST {
-        string user_id
-        list cities
-        date start_date
-        date end_date
-        string session_id_optional
-    }
+    state["TravelPlanState<br/>LangGraph 共享状态<br/>request<br/>normalized_request<br/>working_messages<br/>tool_observations<br/>planner_context<br/>trip_plan optional<br/>validation_errors<br/>retry_count"]
 
-    TRIP_PLAN {
-        string session_id
-        list days
-        list weather_info
-        string overall_suggestions
-    }
+    context["ContextPacket<br/>压缩后的上下文片段<br/>content timestamp<br/>token_count scores<br/>source metadata"]
+    attractionResult["AttractionSearchResult<br/>attractions<br/>search_keywords<br/>step_observations<br/>quality optional"]
+    hotelResult["HotelSearchResult<br/>selected_hotel optional<br/>candidate_hotels<br/>search_areas<br/>ranking_reasons<br/>quality optional"]
+    quality["SearchQuality<br/>enough_results<br/>result_count<br/>retry_suggested<br/>next_keywords"]
+    memoryCandidate["MemoryCandidate<br/>target semantic episodic discard<br/>text reason<br/>confidence metadata"]
+    maintenance["WorkingMemoryMaintenanceResult<br/>retained_messages<br/>extracted_candidates<br/>dropped_count"]
+    tripPlan["TripPlan<br/>最终响应模型<br/>session_id<br/>days<br/>weather_info<br/>overall_suggestions"]
 
-    NORMALIZED_TRIP_REQUEST {
-        string user_id
-        list cities
-        date start_date
-        date end_date
-        int days_count
-        string transport_preference
-        list accommodation_preferences
-        list attraction_preferences
-        int budget_optional
-        string extra_requirements
-        string session_id
-    }
+    request --> session --> normalize --> normalized --> state
+    state --> context
+    state --> attractionResult
+    state --> hotelResult
+    state --> memoryCandidate
+    state --> tripPlan
+    attractionResult --> quality
+    hotelResult --> quality
+    maintenance --> memoryCandidate
 
-    TRAVEL_PLAN_STATE {
-        object request
-        object normalized_request
-        list working_messages
-        list tool_observations
-        list semantic_memories
-        list episodic_memories
-        string planner_context
-        object trip_plan_optional
-        list validation_errors
-        int retry_count
-    }
+    classDef api fill:#e7f5ff,stroke:#1971c2,color:#0b3558
+    classDef transform fill:#fff4e6,stroke:#e67700,color:#5c3300
+    classDef internal fill:#e5dbff,stroke:#5f3dc4,color:#2b174f
+    classDef memory fill:#fff9db,stroke:#f08c00,color:#5c3d00
 
-    CONTEXT_PACKET {
-        string content
-        datetime timestamp
-        int token_count
-        float relevance_score
-        float recency_score
-        float importance
-        float confidence
-        string source
-        dict metadata
-    }
-
-    ATTRACTION_SEARCH_RESULT {
-        list attractions
-        list search_keywords
-        list step_observations
-        object quality_optional
-    }
-
-    HOTEL_SEARCH_RESULT {
-        object selected_hotel_optional
-        list candidate_hotels
-        list search_areas
-        list ranking_reasons
-        list step_observations
-        object quality_optional
-    }
-
-    SEARCH_QUALITY {
-        bool enough_results
-        int result_count
-        string reason
-        bool retry_suggested
-        list next_keywords
-    }
-
-    MEMORY_CANDIDATE {
-        string target
-        string text
-        string reason
-        float confidence
-        dict metadata
-    }
-
-    WORKING_MEMORY_MAINTENANCE_RESULT {
-        list retained_messages
-        list extracted_candidates
-        int dropped_count
-    }
+    class request,tripPlan api
+    class session,normalize transform
+    class normalized,state,context,attractionResult,hotelResult,quality internal
+    class memoryCandidate,maintenance memory
 ```
 
 ## 实施原则
