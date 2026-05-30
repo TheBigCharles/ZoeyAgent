@@ -15,19 +15,39 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 
 ```mermaid
 flowchart TB
-    client["客户端或终端测试"] --> fastapi["FastAPI 应用"]
-    fastapi --> routes["API routes<br/>GET /health<br/>POST /api/trip/plan<br/>memory debug"]
-    routes --> requestContract["请求合同<br/>TripPlanRequest<br/>Pydantic validation"]
-    requestContract --> sessionResolver["SessionResolver<br/>缺失时生成 session_id<br/>已有时继续复用"]
+    client["客户端或终端测试"] --> fastapi["FastAPI 应用入口"]
+
+    subgraph apiLayer["API 层"]
+        direction LR
+        healthApi["GET /health"]
+        planApi["POST /api/trip/plan"]
+        semanticApi["GET /api/memory/semantic"]
+        episodicApi["GET /api/memory/episodic"]
+    end
+
+    fastapi --> healthApi
+    fastapi --> planApi
+    fastapi --> semanticApi
+    fastapi --> episodicApi
+
+    planApi --> requestContract["TripPlanRequest<br/>Pydantic validation"]
+    requestContract --> sessionResolver["SessionResolver<br/>&bull; missing: generate session_id<br/>&bull; existing: reuse session_id<br/>&bull; resolved value becomes thread_id"]
     sessionResolver --> graphStart["TravelPlannerGraph"]
 
-    subgraph graphLayer["LangGraph 编排主线"]
+    subgraph graphLayer["LangGraph 编排层"]
         direction TB
         graphStart --> init["InitializeWorkingState"]
         init --> loadMemory["LoadMemoryNode"]
-        loadMemory --> normalize["NormalizeRequestNode"]
-        normalize --> contextBundle["ContextBundle<br/>memory<br/>attractions<br/>hotels<br/>weather"]
-        contextBundle --> assemble["ContextAssemblyNode"]
+        loadMemory --> memoryRecall["Memory recall in state<br/>&bull; semantic_memories<br/>&bull; episodic_memories"]
+        memoryRecall --> normalize["NormalizeRequestNode"]
+        normalize --> searchFanout["Search and context fanout"]
+        searchFanout --> attraction["AttractionSearchSubgraph"]
+        searchFanout --> weather["WeatherQueryNode"]
+        attraction --> hotel["HotelSearchSubgraph"]
+        weather --> contextBundle["ContextBundle<br/>&bull; semantic memories<br/>&bull; episodic memories<br/>&bull; attractions hotels weather"]
+        hotel --> contextBundle
+        contextBundle --> workingMaintenance["WorkingMemoryMaintenance<br/>conceptual boundary"]
+        workingMaintenance --> assemble["ContextAssemblyNode"]
         assemble --> planner["PlannerNode"]
         planner --> validate{"ValidateTripPlanNode<br/>valid repair fallback"}
         validate -->|valid| saveMemory["SaveMemoryNode"]
@@ -37,39 +57,89 @@ flowchart TB
         fallback --> tripPlan
     end
 
-    subgraph dependencies["支撑依赖"]
+    subgraph workingLayer["Short-term memory 支撑"]
+        direction TB
+        threadMap["session_id to LangGraph thread_id"]
+        shortTermMemory["Short-term memory<br/>LangGraph Checkpointer"]
+        inMemorySaver["InMemorySaver<br/>checkpointer implementation"]
+        travelState["TravelPlanState<br/>&bull; working_messages<br/>&bull; trip_draft<br/>&bull; tool_observations"]
+        stateHelpers["state update helpers<br/>&bull; append_working_message<br/>&bull; append_tool_observation"]
+        overflowPolicy["maintenance policy<br/>&bull; trim old context<br/>&bull; extract useful overflow"]
+        threadMap --> shortTermMemory --> inMemorySaver --> travelState
+        stateHelpers --> travelState
+        travelState --> overflowPolicy
+    end
+
+    subgraph longMemoryLayer["Long-term memory 支撑"]
         direction LR
-        workingMemory["Working memory<br/>InMemorySaver"]
-        longMemory["Long-term memory<br/>PostgresStore"]
-        embeddings["Embeddings<br/>BAAI bge-m3"]
-        llmService["LLMService<br/>OpenAI compatible"]
+        longTermMemory["Long-term memory<br/>LangGraph Store"]
+        storeSearch["Store.search<br/>PostgresStore.search"]
+        storePut["Store.put<br/>PostgresStore.put"]
+        extractionService["MemoryExtractionService<br/>&bull; extract<br/>&bull; classify<br/>&bull; deduplicate"]
+        memoryCandidate["MemoryCandidate<br/>&bull; semantic<br/>&bull; episodic<br/>&bull; discard"]
+        semanticStore["Semantic memory<br/>namespace: user_id semantic_memories<br/>stable preferences and reusable facts"]
+        episodicStore["Episodic memory<br/>namespace: user_id episodic_memories<br/>confirmed rejected modified decisions"]
+        discard["Discard<br/>not useful enough for long-term memory"]
+        postgres["PostgresStore<br/>store implementation<br/>JSON memory documents"]
+        pgvector["Postgres pgvector index"]
+        embeddings["vLLM embeddings<br/>BAAI/bge-m3<br/>OpenAI-compatible /v1/embeddings"]
+
+        longTermMemory --> storeSearch
+        longTermMemory --> storePut
+        storeSearch --> semanticStore
+        storeSearch --> episodicStore
+        storePut --> postgres
+        postgres --> semanticStore
+        postgres --> episodicStore
+        postgres --> pgvector
+        postgres --> embeddings
+        extractionService --> memoryCandidate
+        memoryCandidate --> semanticStore
+        memoryCandidate --> episodicStore
+        memoryCandidate --> discard
+    end
+
+    subgraph externalLayer["外部服务支撑"]
+        direction LR
+        llmService["LLMService<br/>OpenAI compatible<br/>chat tools stream"]
         amapClient["Amap MCP client"]
         amapServer["Amap MCP server"]
         amapApi["Amap API"]
-        longMemory --> embeddings
         amapClient --> amapServer --> amapApi
     end
 
-    init -.-> workingMemory
-    loadMemory -.-> longMemory
-    contextBundle -.-> longMemory
-    contextBundle -.-> amapClient
+    sessionResolver -.-> threadMap
+    init -.-> travelState
+    workingMaintenance -.-> overflowPolicy
+    overflowPolicy -.-> extractionService
+    loadMemory -.-> storeSearch
+    storeSearch -.-> memoryRecall
+    saveMemory -.-> extractionService
+    extractionService -.-> storePut
+    semanticApi -.-> storeSearch
+    episodicApi -.-> storeSearch
+    attraction -.-> amapClient
+    weather -.-> amapClient
+    hotel -.-> amapClient
     planner -.-> llmService
     fallback -.-> llmService
-    saveMemory -.-> longMemory
     tripPlan --> response["TripPlan 响应<br/>含 resolved session_id"]
     response --> client
 
     classDef entry fill:#e7f5ff,stroke:#1971c2,color:#0b3558
     classDef contract fill:#fff4e6,stroke:#e67700,color:#5c3300
     classDef graphNode fill:#e5dbff,stroke:#5f3dc4,color:#2b174f
+    classDef working fill:#fff4e6,stroke:#e67700,color:#5c3300
+    classDef longTerm fill:#fff9db,stroke:#f08c00,color:#5c3d00
     classDef deps fill:#f8f9fa,stroke:#868e96,color:#343a40
     classDef output fill:#d3f9d8,stroke:#2f9e44,color:#14351d
 
-    class client,fastapi,routes entry
+    class client,fastapi,healthApi,planApi,semanticApi,episodicApi entry
     class requestContract,sessionResolver contract
-    class graphStart,init,loadMemory,normalize,contextBundle,assemble,planner,validate,saveMemory,fallback graphNode
-    class workingMemory,longMemory,embeddings,llmService,amapClient,amapServer,amapApi deps
+    class graphStart,init,loadMemory,memoryRecall,normalize,searchFanout,attraction,weather,hotel,contextBundle,workingMaintenance,assemble,planner,validate,saveMemory,fallback graphNode
+    class threadMap,shortTermMemory,inMemorySaver,travelState,stateHelpers,overflowPolicy working
+    class longTermMemory,storeSearch,storePut,extractionService,memoryCandidate,semanticStore,episodicStore,discard,postgres,pgvector,embeddings longTerm
+    class llmService,amapClient,amapServer,amapApi deps
     class tripPlan,response output
 ```
 
