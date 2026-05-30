@@ -200,20 +200,20 @@ Graph 和 memory 内部合同：
 
 ```mermaid
 flowchart TB
-    request["TripPlanRequest<br/>原始 API 输入<br/>user_id cities dates<br/>preferences budget<br/>extra_requirements<br/>session_id optional"]
-    session["SessionResolver<br/>如果缺失则生成 session_id<br/>如果存在则复用 session_id"]
-    normalize["NormalizeRequestNode<br/>清洗 cities<br/>计算 days_count<br/>枚举索引转英文值<br/>保留 budget 和 extra_requirements"]
-    normalized["NormalizedTripRequest<br/>graph 内部输入<br/>user_id cities dates<br/>days_count<br/>transport_preference<br/>accommodation_preferences<br/>attraction_preferences<br/>budget optional<br/>extra_requirements<br/>session_id required"]
+    request["TripPlanRequest<br/>原始 API 输入<br/>&bull; user_id, cities, dates<br/>&bull; preferences, budget<br/>&bull; extra_requirements<br/>&bull; session_id optional"]
+    session["SessionResolver<br/>会话解析<br/>&bull; missing: generate session_id<br/>&bull; existing: reuse session_id"]
+    normalize["NormalizeRequestNode<br/>请求归一化<br/>&bull; clean cities<br/>&bull; compute days_count<br/>&bull; enum index to English value<br/>&bull; keep budget and extra_requirements"]
+    normalized["NormalizedTripRequest<br/>graph 内部输入<br/>&bull; user_id, cities, dates<br/>&bull; days_count<br/>&bull; transport_preference<br/>&bull; accommodation_preferences<br/>&bull; attraction_preferences<br/>&bull; budget optional<br/>&bull; extra_requirements<br/>&bull; session_id required"]
 
-    state["TravelPlanState<br/>LangGraph 共享状态<br/>request<br/>normalized_request<br/>working_messages<br/>tool_observations<br/>planner_context<br/>trip_plan optional<br/>validation_errors<br/>retry_count"]
+    state["TravelPlanState<br/>LangGraph 共享状态<br/>&bull; request, normalized_request<br/>&bull; working_messages<br/>&bull; tool_observations<br/>&bull; planner_context<br/>&bull; trip_plan optional<br/>&bull; validation_errors<br/>&bull; retry_count"]
 
-    context["ContextPacket<br/>压缩后的上下文片段<br/>content timestamp<br/>token_count scores<br/>source metadata"]
-    attractionResult["AttractionSearchResult<br/>attractions<br/>search_keywords<br/>step_observations<br/>quality optional"]
-    hotelResult["HotelSearchResult<br/>selected_hotel optional<br/>candidate_hotels<br/>search_areas<br/>ranking_reasons<br/>quality optional"]
-    quality["SearchQuality<br/>enough_results<br/>result_count<br/>retry_suggested<br/>next_keywords"]
-    memoryCandidate["MemoryCandidate<br/>target semantic episodic discard<br/>text reason<br/>confidence metadata"]
-    maintenance["WorkingMemoryMaintenanceResult<br/>retained_messages<br/>extracted_candidates<br/>dropped_count"]
-    tripPlan["TripPlan<br/>最终响应模型<br/>session_id<br/>days<br/>weather_info<br/>overall_suggestions"]
+    context["ContextPacket<br/>压缩上下文片段<br/>&bull; content, timestamp<br/>&bull; token_count<br/>&bull; relevance, recency<br/>&bull; importance, confidence<br/>&bull; source, metadata"]
+    attractionResult["AttractionSearchResult<br/>景点搜索结果<br/>&bull; attractions<br/>&bull; search_keywords<br/>&bull; step_observations<br/>&bull; quality optional"]
+    hotelResult["HotelSearchResult<br/>酒店搜索结果<br/>&bull; selected_hotel optional<br/>&bull; candidate_hotels<br/>&bull; search_areas<br/>&bull; ranking_reasons<br/>&bull; step_observations<br/>&bull; quality optional"]
+    quality["SearchQuality<br/>搜索质量评估<br/>&bull; enough_results<br/>&bull; result_count<br/>&bull; retry_suggested<br/>&bull; next_keywords"]
+    memoryCandidate["MemoryCandidate<br/>候选长期记忆<br/>&bull; target: semantic, episodic, discard<br/>&bull; text, reason<br/>&bull; confidence, metadata"]
+    maintenance["WorkingMemoryMaintenanceResult<br/>工作记忆维护结果<br/>&bull; retained_messages<br/>&bull; extracted_candidates<br/>&bull; dropped_count"]
+    tripPlan["TripPlan<br/>最终响应模型<br/>&bull; session_id<br/>&bull; days<br/>&bull; weather_info<br/>&bull; overall_suggestions"]
 
     request --> session --> normalize --> normalized --> state
     state --> context
