@@ -19,15 +19,20 @@ flowchart TB
     fastapi --> api["API routes<br/>隔离 HTTP 边界<br/>GET /health<br/>POST /api/trip/plan<br/>memory debug"]
     api --> requestContract["TripPlanRequest<br/>保证输入合法<br/>Pydantic validation"]
     requestContract --> sessionResolver["SessionResolver<br/>保证同一次规划可续接<br/>resolve session_id as thread_id"]
-    sessionResolver --> graphStart["TravelPlannerGraph"]
+    sessionResolver --> initialState["TravelPlanState<br/>创建 graph 输入状态"]
 
-    subgraph graphLayer["LangGraph 编排主线"]
+    subgraph graphLayer["TravelPlannerGraph / LangGraph 编排主线"]
         direction TB
-        graphStart --> init["InitializeWorkingState<br/>恢复当前会话状态"]
+        init["InitializeWorkingState<br/>初始化/恢复当前会话状态"]
         init --> loadMemory["LoadMemoryNode<br/>让计划接上历史偏好"]
         loadMemory --> normalize["NormalizeRequestNode<br/>把前端输入转为 graph 可用格式"]
-        normalize --> contextBundle["ContextBundle<br/>把记忆和工具结果放到一起<br/>memory attractions hotels weather"]
-        contextBundle --> assemble["ContextAssemblyNode<br/>控制给 LLM 的上下文"]
+        normalize --> attraction["AttractionSearchSubgraph<br/>先找可用景点候选"]
+        normalize --> weather["WeatherQueryNode<br/>天气只依赖城市和日期"]
+        attraction --> hotel["HotelSearchSubgraph<br/>酒店依赖景点位置"]
+        attraction --> workingMaintenance["WorkingMemoryMaintenanceNode<br/>规划前保持上下文可控"]
+        weather --> workingMaintenance
+        hotel --> workingMaintenance
+        workingMaintenance --> assemble["ContextAssemblyNode<br/>从 state 汇总 planner context"]
         assemble --> planner["PlannerNode<br/>生成可渲染行程"]
         planner --> validate{"ValidateTripPlanNode<br/>防止无效计划出 API<br/>valid repair fallback"}
         validate -->|valid| saveMemory["SaveMemoryNode"]
@@ -36,6 +41,8 @@ flowchart TB
         validate -->|fallback| fallback["FallbackNode<br/>失败时仍返回可控结果"]
         fallback --> tripPlan
     end
+
+    initialState --> init
 
     subgraph supportLayer["支撑依赖"]
         direction LR
@@ -64,7 +71,9 @@ flowchart TB
     init -.-> shortTerm
     loadMemory -.-> longTerm
     saveMemory -.-> memoryPromotion
-    contextBundle -.-> attractionBridge
+    attraction -.-> attractionBridge
+    weather -.-> attractionBridge
+    hotel -.-> attractionBridge
     planner -.-> llmService
     fallback -.-> llmService
     tripPlan --> response["TripPlan 响应<br/>含 resolved session_id"]
@@ -77,8 +86,8 @@ flowchart TB
     classDef output fill:#d3f9d8,stroke:#2f9e44,color:#14351d
 
     class client,fastapi,api entry
-    class requestContract,sessionResolver contract
-    class graphStart,init,loadMemory,normalize,contextBundle,assemble,planner,validate,saveMemory,fallback graphNode
+    class requestContract,sessionResolver,initialState contract
+    class init,loadMemory,normalize,attraction,weather,hotel,workingMaintenance,assemble,planner,validate,saveMemory,fallback graphNode
     class shortTerm,memoryPromotion,longTerm,semanticStore,episodicStore,embeddings,llmService,amapClient,amapServer,amapApi,attractionBridge deps
     class tripPlan,response output
 ```
