@@ -14,283 +14,294 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 ## 总体架构
 
 ```mermaid
-flowchart LR
-    client["客户端或终端测试"] --> fastapi["FastAPI 应用入口"]
+flowchart TB
+    client["客户端或终端测试"] --> fastapi["FastAPI 应用"]
+    fastapi --> routes["API routes<br/>GET /health<br/>POST /api/trip/plan<br/>memory debug"]
+    routes --> requestContract["请求合同<br/>TripPlanRequest<br/>Pydantic validation"]
+    requestContract --> sessionResolver["SessionResolver<br/>缺失时生成 session_id<br/>已有时继续复用"]
+    sessionResolver --> graphStart["TravelPlannerGraph"]
 
-    subgraph apiLayer["API 层"]
+    subgraph graphLayer["LangGraph 编排主线"]
         direction TB
-        health["GET /health"]
-        planApi["POST /api/trip/plan"]
-        memoryApi["调试用 memory endpoints"]
+        graphStart --> init["InitializeWorkingState"]
+        init --> loadMemory["LoadMemoryNode"]
+        loadMemory --> normalize["NormalizeRequestNode"]
+        normalize --> contextBundle["ContextBundle<br/>memory<br/>attractions<br/>hotels<br/>weather"]
+        contextBundle --> assemble["ContextAssemblyNode"]
+        assemble --> planner["PlannerNode"]
+        planner --> validate{"ValidateTripPlanNode<br/>valid repair fallback"}
+        validate -->|valid| saveMemory["SaveMemoryNode"]
+        saveMemory --> tripPlan["TripPlan"]
+        validate -.->|repair| assemble
+        validate -->|fallback| fallback["FallbackNode"]
+        fallback --> tripPlan
     end
 
-    subgraph contractLayer["请求合同层"]
-        direction TB
-        schema["TripPlanRequest 校验"]
-        session["SessionResolver<br/>复用或生成 session_id"]
-    end
-
-    subgraph graphLayer["LangGraph 编排层"]
-        direction TB
-        graphStart["TravelPlannerGraph"]
-        init["InitializeWorkingState"]
-        loadMemory["LoadMemoryNode"]
-        normalize["NormalizeRequestNode"]
-        dispatch["ContextDispatch<br/>分发上下文请求"]
-        attraction["AttractionSearchSubgraph"]
-        weather["WeatherQueryNode"]
-        hotel["HotelSearchSubgraph"]
-        externalContext["ExternalContext<br/>景点 酒店 天气"]
-        memoryContext["MemoryContext<br/>语义和事件记忆"]
-        assemble["ContextAssemblyNode"]
-        planner["PlannerNode"]
-        validate{"ValidateTripPlanNode"}
-        saveMemory["SaveMemoryNode"]
-        fallback["FallbackNode"]
-        graphOutput["TripPlan"]
-
-        graphStart --> init --> loadMemory --> normalize --> dispatch
-        loadMemory --> memoryContext
-        dispatch --> attraction --> hotel --> externalContext
-        dispatch --> weather --> externalContext
-        memoryContext --> assemble
-        externalContext --> assemble
-        assemble --> planner --> validate
-        validate -->|valid| saveMemory --> graphOutput
-        validate -->|repair| assemble
-        validate -->|fallback| fallback --> graphOutput
-    end
-
-    subgraph serviceLayer["服务和工具层"]
-        direction TB
+    subgraph dependencies["支撑依赖"]
+        direction LR
+        workingMemory["Working memory<br/>InMemorySaver"]
+        longMemory["Long-term memory<br/>PostgresStore"]
+        embeddings["Embeddings<br/>BAAI bge-m3"]
+        llmService["LLMService<br/>OpenAI compatible"]
         amapClient["Amap MCP client"]
         amapServer["Amap MCP server"]
-        amapApi["Amap 外部 API"]
-        llmService["LLMService<br/>OpenAI compatible"]
+        amapApi["Amap API"]
+        longMemory --> embeddings
         amapClient --> amapServer --> amapApi
     end
 
-    subgraph memoryLayer["记忆层"]
-        direction TB
-        working["Working memory<br/>InMemorySaver"]
-        store["Long-term memory<br/>PostgresStore"]
-        semantic["Semantic memories"]
-        episodic["Episodic memories"]
-        embedding["vLLM embeddings<br/>BAAI bge-m3"]
-        store --> semantic
-        store --> episodic
-        store --> embedding
-    end
-
-    fastapi --> health
-    fastapi --> planApi
-    fastapi --> memoryApi
-    planApi --> schema --> session --> graphStart
-    init -.-> working
-    loadMemory -.-> store
-    saveMemory -.-> store
-    attraction -.-> amapClient
-    weather -.-> amapClient
-    hotel -.-> amapClient
+    init -.-> workingMemory
+    loadMemory -.-> longMemory
+    contextBundle -.-> longMemory
+    contextBundle -.-> amapClient
     planner -.-> llmService
     fallback -.-> llmService
-    graphOutput --> response["TripPlan 响应"]
+    saveMemory -.-> longMemory
+    tripPlan --> response["TripPlan 响应<br/>含 resolved session_id"]
     response --> client
+
+    classDef entry fill:#e7f5ff,stroke:#1971c2,color:#0b3558
+    classDef contract fill:#fff4e6,stroke:#e67700,color:#5c3300
+    classDef graphNode fill:#e5dbff,stroke:#5f3dc4,color:#2b174f
+    classDef deps fill:#f8f9fa,stroke:#868e96,color:#343a40
+    classDef output fill:#d3f9d8,stroke:#2f9e44,color:#14351d
+
+    class client,fastapi,routes entry
+    class requestContract,sessionResolver contract
+    class graphStart,init,loadMemory,normalize,contextBundle,assemble,planner,validate,saveMemory,fallback graphNode
+    class workingMemory,longMemory,embeddings,llmService,amapClient,amapServer,amapApi deps
+    class tripPlan,response output
 ```
 
 ## Pydantic 数据结构
 
+公共 API 和前端渲染合同：
+
 ```mermaid
-classDiagram
-    direction TB
+erDiagram
+    TRIP_PLAN_REQUEST ||--|| TRIP_PREFERENCES_INPUT : uses
+    TRIP_PLAN ||--|{ DAY_PLAN : contains
+    TRIP_PLAN ||--o{ WEATHER_INFO : includes
+    DAY_PLAN ||--o| HOTEL : selects
+    DAY_PLAN ||--o{ ATTRACTION : visits
+    DAY_PLAN ||--|{ MEAL : includes
+    DAY_PLAN ||--o{ MAP_POINT : renders
+    ATTRACTION }o--o| LOCATION : may_have
+    HOTEL }o--o| LOCATION : may_have
+    MEAL }o--o| LOCATION : may_have
+    MAP_POINT ||--|| LOCATION : requires
 
-    class TripPlanRequest {
-        +str user_id
-        +list~str~ cities
-        +date start_date
-        +date end_date
-        +TripPreferencesInput preferences
-        +Optional~int~ budget
-        +str extra_requirements
-        +Optional~str~ session_id
+    TRIP_PLAN_REQUEST {
+        string user_id
+        list cities
+        date start_date
+        date end_date
+        int budget_optional
+        string extra_requirements
+        string session_id_optional
     }
 
-    class TripPreferencesInput {
-        +TransportPreference transport_preference
-        +list~AccommodationPreference~ accommodation_preference
-        +list~AttractionPreference~ attraction_preference
+    TRIP_PREFERENCES_INPUT {
+        int transport_preference
+        list accommodation_preference
+        list attraction_preference
     }
 
-    class TripPlan {
-        +str session_id
-        +list~str~ cities
-        +date start_date
-        +date end_date
-        +list~DayPlan~ days
-        +list~WeatherInfo~ weather_info
-        +str overall_suggestions
-        +Optional~str~ generated_at
+    TRIP_PLAN {
+        string session_id
+        list cities
+        date start_date
+        date end_date
+        list days
+        list weather_info
+        string overall_suggestions
+        string generated_at_optional
     }
 
-    class DayPlan {
-        +date date
-        +int day_index
-        +str city
-        +str description
-        +str transportation
-        +str accommodation
-        +Optional~Hotel~ hotel
-        +list~Attraction~ attractions
-        +list~Meal~ meals
-        +list~MapPoint~ map_points
-        +int total_price
-        +Optional~float~ route_distance_km
-        +Optional~int~ route_duration_minutes
-        +Optional~str~ transit_method
+    DAY_PLAN {
+        date date
+        int day_index
+        string city
+        string description
+        string transportation
+        string accommodation
+        int total_price
+        float route_distance_km_optional
+        int route_duration_minutes_optional
+        string transit_method_optional
     }
 
-    class Attraction {
-        +str name
-        +Optional~str~ city
-        +str address
-        +Optional~Location~ location
-        +int visit_duration
-        +str description
-        +str category
-        +Optional~float~ rating
-        +Optional~str~ image_url
-        +int ticket_price
-        +Optional~str~ poi_id
-        +Optional~int~ order_index
-        +Optional~str~ source
+    ATTRACTION {
+        string name
+        string city_optional
+        string address
+        int visit_duration
+        string description
+        string category
+        float rating_optional
+        string image_url_optional
+        int ticket_price
+        string poi_id_optional
+        int order_index_optional
+        string source_optional
     }
 
-    class Hotel {
-        +str name
-        +Optional~str~ city
-        +str address
-        +Optional~Location~ location
-        +str price_range
-        +Optional~float~ rating
-        +str distance
-        +str type
-        +int estimated_cost
-        +Optional~str~ poi_id
-        +Optional~float~ distance_to_main_area_km
-        +Optional~int~ estimated_travel_time_minutes
-        +Optional~str~ transit_method
-        +Optional~str~ source
+    HOTEL {
+        string name
+        string city_optional
+        string address
+        string price_range
+        float rating_optional
+        string distance
+        string type
+        int estimated_cost
+        string poi_id_optional
+        float distance_to_main_area_km_optional
+        int estimated_travel_time_minutes_optional
+        string transit_method_optional
+        string source_optional
     }
 
-    class Meal {
-        +MealType type
-        +str name
-        +Optional~str~ city
-        +Optional~str~ address
-        +Optional~Location~ location
-        +Optional~str~ description
-        +int estimated_cost
+    MEAL {
+        string type
+        string name
+        string city_optional
+        string address_optional
+        string description_optional
+        int estimated_cost
     }
 
-    class WeatherInfo {
-        +str city
-        +date date
-        +str day_weather
-        +str night_weather
-        +int day_temp
-        +int night_temp
-        +str wind_direction
-        +str wind_power
+    WEATHER_INFO {
+        string city
+        date date
+        string day_weather
+        string night_weather
+        int day_temp
+        int night_temp
+        string wind_direction
+        string wind_power
     }
 
-    class MapPoint {
-        +str name
-        +Optional~str~ city
-        +Location location
-        +Optional~int~ day_index
-        +Optional~int~ order_index
-        +str point_type
+    MAP_POINT {
+        string name
+        string city_optional
+        int day_index_optional
+        int order_index_optional
+        string point_type
     }
 
-    class Location {
-        +float longitude
-        +float latitude
+    LOCATION {
+        float longitude
+        float latitude
+    }
+```
+
+Graph 和 memory 内部合同：
+
+```mermaid
+erDiagram
+    TRIP_PLAN_REQUEST ||--|| NORMALIZED_TRIP_REQUEST : normalizes_to
+    NORMALIZED_TRIP_REQUEST ||--|| TRAVEL_PLAN_STATE : enters
+    TRAVEL_PLAN_STATE ||--o{ CONTEXT_PACKET : carries
+    TRAVEL_PLAN_STATE ||--o| ATTRACTION_SEARCH_RESULT : stores
+    TRAVEL_PLAN_STATE ||--o| HOTEL_SEARCH_RESULT : stores
+    TRAVEL_PLAN_STATE ||--o{ MEMORY_CANDIDATE : extracts
+    TRAVEL_PLAN_STATE ||--o| TRIP_PLAN : returns
+    ATTRACTION_SEARCH_RESULT ||--o| SEARCH_QUALITY : evaluated_by
+    HOTEL_SEARCH_RESULT ||--o| SEARCH_QUALITY : evaluated_by
+    WORKING_MEMORY_MAINTENANCE_RESULT ||--o{ MEMORY_CANDIDATE : extracts
+
+    TRIP_PLAN_REQUEST {
+        string user_id
+        list cities
+        date start_date
+        date end_date
+        string session_id_optional
     }
 
-    class NormalizedTripRequest {
-        +str user_id
-        +list~str~ cities
-        +date start_date
-        +date end_date
-        +int days_count
-        +str transport_preference
-        +list~str~ accommodation_preferences
-        +list~str~ attraction_preferences
-        +Optional~int~ budget
-        +str extra_requirements
-        +str session_id
+    TRIP_PLAN {
+        string session_id
+        list days
+        list weather_info
+        string overall_suggestions
     }
 
-    class AttractionSearchResult {
-        +list~Attraction~ attractions
-        +list~str~ search_keywords
-        +list~str~ step_observations
-        +Optional~SearchQuality~ quality
+    NORMALIZED_TRIP_REQUEST {
+        string user_id
+        list cities
+        date start_date
+        date end_date
+        int days_count
+        string transport_preference
+        list accommodation_preferences
+        list attraction_preferences
+        int budget_optional
+        string extra_requirements
+        string session_id
     }
 
-    class HotelSearchResult {
-        +Optional~Hotel~ selected_hotel
-        +list~Hotel~ candidate_hotels
-        +list~str~ search_areas
-        +list~str~ ranking_reasons
-        +list~str~ step_observations
-        +Optional~SearchQuality~ quality
+    TRAVEL_PLAN_STATE {
+        object request
+        object normalized_request
+        list working_messages
+        list tool_observations
+        list semantic_memories
+        list episodic_memories
+        string planner_context
+        object trip_plan_optional
+        list validation_errors
+        int retry_count
     }
 
-    class SearchQuality {
-        +bool enough_results
-        +int result_count
-        +str reason
-        +bool retry_suggested
-        +list~str~ next_keywords
+    CONTEXT_PACKET {
+        string content
+        datetime timestamp
+        int token_count
+        float relevance_score
+        float recency_score
+        float importance
+        float confidence
+        string source
+        dict metadata
     }
 
-    class MemoryCandidate {
-        +MemoryTarget target
-        +str text
-        +str reason
-        +float confidence
-        +dict metadata
+    ATTRACTION_SEARCH_RESULT {
+        list attractions
+        list search_keywords
+        list step_observations
+        object quality_optional
     }
 
-    class WorkingMemoryMaintenanceResult {
-        +list~Any~ retained_messages
-        +list~MemoryCandidate~ extracted_candidates
-        +int dropped_count
+    HOTEL_SEARCH_RESULT {
+        object selected_hotel_optional
+        list candidate_hotels
+        list search_areas
+        list ranking_reasons
+        list step_observations
+        object quality_optional
     }
 
-    note for TripPlanRequest "validators: cities, date_range, session_id normalization"
-    note for TripPlan "validators: session_id, date_range, days_count"
-    note for DayPlan "validator: exactly one breakfast, lunch, dinner"
-    note for WeatherInfo "validator: provider temperature string parsing"
+    SEARCH_QUALITY {
+        bool enough_results
+        int result_count
+        string reason
+        bool retry_suggested
+        list next_keywords
+    }
 
-    TripPlanRequest *-- TripPreferencesInput : preferences
-    TripPlanRequest ..> NormalizedTripRequest : normalized_to
-    TripPlan *-- DayPlan : days
-    TripPlan *-- WeatherInfo : weather_info
-    DayPlan o-- Hotel : hotel
-    DayPlan *-- Attraction : attractions
-    DayPlan *-- Meal : meals
-    DayPlan *-- MapPoint : map_points
-    Attraction o-- Location : location
-    Hotel o-- Location : location
-    Meal o-- Location : location
-    MapPoint *-- Location : location
-    AttractionSearchResult *-- Attraction : attractions
-    AttractionSearchResult o-- SearchQuality : quality
-    HotelSearchResult o-- Hotel : hotels
-    HotelSearchResult o-- SearchQuality : quality
-    WorkingMemoryMaintenanceResult *-- MemoryCandidate : extracted
+    MEMORY_CANDIDATE {
+        string target
+        string text
+        string reason
+        float confidence
+        dict metadata
+    }
+
+    WORKING_MEMORY_MAINTENANCE_RESULT {
+        list retained_messages
+        list extracted_candidates
+        int dropped_count
+    }
 ```
 
 ## 实施原则
