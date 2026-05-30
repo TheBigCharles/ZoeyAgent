@@ -15,37 +15,37 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 
 ```mermaid
 flowchart TB
-    client["客户端或终端测试"] --> fastapi["FastAPI 应用"]
-    fastapi --> api["API routes<br/>GET /health<br/>POST /api/trip/plan<br/>memory debug"]
-    api --> requestContract["TripPlanRequest<br/>Pydantic validation"]
-    requestContract --> sessionResolver["SessionResolver<br/>resolve session_id as thread_id"]
+    client["客户端或终端测试"] --> fastapi["FastAPI 应用<br/>承接外部请求"]
+    fastapi --> api["API routes<br/>隔离 HTTP 边界<br/>GET /health<br/>POST /api/trip/plan<br/>memory debug"]
+    api --> requestContract["TripPlanRequest<br/>保证输入合法<br/>Pydantic validation"]
+    requestContract --> sessionResolver["SessionResolver<br/>保证同一次规划可续接<br/>resolve session_id as thread_id"]
     sessionResolver --> graphStart["TravelPlannerGraph"]
 
     subgraph graphLayer["LangGraph 编排主线"]
         direction TB
-        graphStart --> init["InitializeWorkingState"]
-        init --> loadMemory["LoadMemoryNode"]
-        loadMemory --> normalize["NormalizeRequestNode"]
-        normalize --> contextBundle["ContextBundle<br/>memory attractions hotels weather"]
-        contextBundle --> assemble["ContextAssemblyNode"]
-        assemble --> planner["PlannerNode"]
-        planner --> validate{"ValidateTripPlanNode<br/>valid repair fallback"}
+        graphStart --> init["InitializeWorkingState<br/>恢复当前会话状态"]
+        init --> loadMemory["LoadMemoryNode<br/>让计划接上历史偏好"]
+        loadMemory --> normalize["NormalizeRequestNode<br/>把前端输入转为 graph 可用格式"]
+        normalize --> contextBundle["ContextBundle<br/>把记忆和工具结果放到一起<br/>memory attractions hotels weather"]
+        contextBundle --> assemble["ContextAssemblyNode<br/>控制给 LLM 的上下文"]
+        assemble --> planner["PlannerNode<br/>生成可渲染行程"]
+        planner --> validate{"ValidateTripPlanNode<br/>防止无效计划出 API<br/>valid repair fallback"}
         validate -->|valid| saveMemory["SaveMemoryNode"]
-        saveMemory --> tripPlan["TripPlan"]
+        saveMemory --> tripPlan["TripPlan<br/>前端直接渲染"]
         validate -.->|repair| assemble
-        validate -->|fallback| fallback["FallbackNode"]
+        validate -->|fallback| fallback["FallbackNode<br/>失败时仍返回可控结果"]
         fallback --> tripPlan
     end
 
     subgraph supportLayer["支撑依赖"]
         direction LR
-        shortTerm["Short-term memory<br/>Checkpointer<br/>InMemorySaver"]
-        longTerm["Long-term memory<br/>Store<br/>PostgresStore"]
-        semanticStore["Semantic memory"]
-        episodicStore["Episodic memory"]
-        embeddings["Embeddings<br/>BAAI/bge-m3"]
-        llmService["LLMService<br/>OpenAI compatible"]
-        amapClient["Amap MCP client"]
+        shortTerm["Short-term memory (Checkpointer)<br/>保存当前会话状态<br/>InMemorySaver"]
+        longTerm["Long-term memory (Store)<br/>跨会话复用记忆<br/>PostgresStore"]
+        semanticStore["Semantic memory<br/>保存稳定偏好"]
+        episodicStore["Episodic memory<br/>保存历史决策"]
+        embeddings["Embeddings<br/>让记忆可语义检索<br/>BAAI/bge-m3"]
+        llmService["LLMService<br/>统一模型调用入口<br/>OpenAI compatible"]
+        amapClient["Amap MCP client<br/>统一地图工具入口"]
         amapServer["Amap MCP server"]
         amapApi["Amap API"]
         longTerm --> semanticStore
