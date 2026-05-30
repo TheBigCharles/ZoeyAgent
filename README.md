@@ -21,18 +21,19 @@ flowchart TB
     requestContract --> sessionResolver["SessionResolver<br/>保证同一次规划可续接<br/>resolve session_id as thread_id"]
     sessionResolver --> initialState["TravelPlanState<br/>创建 graph 输入状态"]
 
-    subgraph graphLayer["TravelPlannerGraph / LangGraph 编排主线"]
+    subgraph graphLayer["TravelPlannerGraph 编排主线 using LangGraph"]
         direction TB
         init["InitializeWorkingState<br/>初始化/恢复当前会话状态"]
         init --> loadMemory["LoadMemoryNode<br/>让计划接上历史偏好"]
         loadMemory --> normalize["NormalizeRequestNode<br/>把前端输入转为 graph 可用格式"]
         normalize --> searchFanout["Search fanout<br/>分发工具查询任务"]
         searchFanout --> attraction["AttractionSearchSubgraph<br/>先找可用景点候选"]
-        searchFanout --> weather["WeatherQueryNode<br/>天气只依赖城市和日期"]
         attraction --> hotel["HotelSearchSubgraph<br/>酒店依赖景点位置"]
+        searchFanout --> weather["WeatherQueryNode<br/>天气只依赖城市和日期"]
+        hotel ~~~ weather
         attraction --> searchResults["Search results in state<br/>景点 天气 酒店写回状态"]
-        weather --> searchResults
         hotel --> searchResults
+        weather --> searchResults
         searchResults --> workingMaintenance["WorkingMemoryMaintenanceNode<br/>规划前保持上下文可控"]
         workingMaintenance --> assemble["ContextAssemblyNode<br/>从 state 汇总 planner context"]
         assemble --> planner["PlannerNode<br/>生成可渲染行程"]
