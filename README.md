@@ -26,13 +26,14 @@ flowchart TB
         init["InitializeWorkingState<br/>初始化/恢复当前会话状态"]
         init --> loadMemory["LoadMemoryNode<br/>让计划接上历史偏好"]
         loadMemory --> normalize["NormalizeRequestNode<br/>把前端输入转为 graph 可用格式"]
-        normalize --> fanout["Search fanout<br/>分发工具查询任务"]
-        fanout --> attraction["AttractionSearchSubgraph<br/>先找可用景点候选"]
-        fanout --> weather["WeatherQueryNode<br/>天气只依赖城市和日期"]
+        normalize --> searchFanout["Search fanout<br/>分发工具查询任务"]
+        searchFanout --> attraction["AttractionSearchSubgraph<br/>先找可用景点候选"]
+        searchFanout --> weather["WeatherQueryNode<br/>天气只依赖城市和日期"]
         attraction --> hotel["HotelSearchSubgraph<br/>酒店依赖景点位置"]
-        attraction --> workingMaintenance["WorkingMemoryMaintenanceNode<br/>规划前保持上下文可控"]
-        weather --> workingMaintenance
-        hotel --> workingMaintenance
+        attraction --> searchResults["Search results in state<br/>景点 天气 酒店写回状态"]
+        weather --> searchResults
+        hotel --> searchResults
+        searchResults --> workingMaintenance["WorkingMemoryMaintenanceNode<br/>规划前保持上下文可控"]
         workingMaintenance --> assemble["ContextAssemblyNode<br/>从 state 汇总 planner context"]
         assemble --> planner["PlannerNode<br/>生成可渲染行程"]
         planner --> validate{"ValidateTripPlanNode<br/>防止无效计划出 API<br/>valid repair fallback"}
@@ -44,13 +45,6 @@ flowchart TB
     end
 
     initialState --> init
-
-    subgraph accessLayer["依赖访问点"]
-        direction LR
-        memoryAccess["Memory access<br/>读写会话和长期记忆"]
-        amapAccess["Amap access<br/>景点 天气 酒店工具"]
-        llmAccess["LLM access<br/>规划和保底生成"]
-    end
 
     subgraph supportLayer["支撑依赖"]
         direction LR
@@ -76,21 +70,13 @@ flowchart TB
         embeddings ~~~ llmService
     end
 
-    init -.-> memoryAccess
-    loadMemory -.-> memoryAccess
-    workingMaintenance -.-> memoryAccess
-    saveMemory -.-> memoryAccess
-    attraction -.-> amapAccess
-    weather -.-> amapAccess
-    hotel -.-> amapAccess
-    planner -.-> llmAccess
-    fallback -.-> llmAccess
-
-    memoryAccess -.-> shortTerm
-    memoryAccess -.-> longTerm
-    memoryAccess -.-> memoryPromotion
-    amapAccess -.-> attractionBridge
-    llmAccess -.-> llmService
+    init -.-> shortTerm
+    workingMaintenance -.-> shortTerm
+    loadMemory -.-> longTerm
+    saveMemory -.-> memoryPromotion
+    searchFanout -.-> attractionBridge
+    planner -.-> llmService
+    fallback -.-> llmService
 
     tripPlan --> response["客户端收到 TripPlan<br/>含 resolved session_id"]
 
@@ -102,8 +88,7 @@ flowchart TB
 
     class client,fastapi,api entry
     class requestContract,sessionResolver,initialState contract
-    class init,loadMemory,normalize,fanout,attraction,weather,hotel,workingMaintenance,assemble,planner,validate,saveMemory,fallback graphNode
-    class memoryAccess,amapAccess,llmAccess deps
+    class init,loadMemory,normalize,searchFanout,attraction,weather,hotel,searchResults,workingMaintenance,assemble,planner,validate,saveMemory,fallback graphNode
     class shortTerm,memoryPromotion,longTerm,semanticStore,episodicStore,embeddings,llmService,amapClient,amapServer,amapApi,attractionBridge deps
     class tripPlan,response output
 ```
