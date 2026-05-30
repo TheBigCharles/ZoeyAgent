@@ -69,6 +69,7 @@ flowchart TB
     end
 
     init -.-> shortTerm
+    workingMaintenance -.-> shortTerm
     loadMemory -.-> longTerm
     saveMemory -.-> memoryPromotion
     attraction -.-> attractionBridge
