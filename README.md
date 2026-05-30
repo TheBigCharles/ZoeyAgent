@@ -14,54 +14,64 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 ## 总体架构
 
 ```mermaid
-flowchart TB
-    client["客户端或终端测试"] --> api["FastAPI 后端"]
-    api --> schema["Pydantic 请求校验"]
-    schema --> travelPlannerGraph["TravelPlannerGraph"]
+flowchart LR
+    client["客户端或终端测试"] --> fastapi["FastAPI 应用入口"]
 
-    subgraph app["应用层"]
+    subgraph apiLayer["API 层"]
+        direction TB
         health["GET /health"]
         planApi["POST /api/trip/plan"]
         memoryApi["调试用 memory endpoints"]
     end
 
-    subgraph agents["LangGraph 编排层"]
+    subgraph contractLayer["请求合同层"]
+        direction TB
+        schema["TripPlanRequest 校验"]
+        session["SessionResolver<br/>复用或生成 session_id"]
+    end
+
+    subgraph graphLayer["LangGraph 编排层"]
+        direction TB
+        graphStart["TravelPlannerGraph"]
         init["InitializeWorkingState"]
         loadMemory["LoadMemoryNode"]
         normalize["NormalizeRequestNode"]
+        dispatch["ContextDispatch<br/>分发上下文请求"]
         attraction["AttractionSearchSubgraph"]
         weather["WeatherQueryNode"]
         hotel["HotelSearchSubgraph"]
+        externalContext["ExternalContext<br/>景点 酒店 天气"]
+        memoryContext["MemoryContext<br/>语义和事件记忆"]
         assemble["ContextAssemblyNode"]
         planner["PlannerNode"]
-        validate["ValidateTripPlanNode"]
+        validate{"ValidateTripPlanNode"}
         saveMemory["SaveMemoryNode"]
         fallback["FallbackNode"]
+        graphOutput["TripPlan"]
 
-        init --> loadMemory
-        loadMemory --> normalize
-        normalize --> attraction
-        normalize --> weather
-        attraction --> hotel
-        attraction --> assemble
-        weather --> assemble
-        hotel --> assemble
-        assemble --> planner
-        planner --> validate
-        validate -->|valid| saveMemory
+        graphStart --> init --> loadMemory --> normalize --> dispatch
+        loadMemory --> memoryContext
+        dispatch --> attraction --> hotel --> externalContext
+        dispatch --> weather --> externalContext
+        memoryContext --> assemble
+        externalContext --> assemble
+        assemble --> planner --> validate
+        validate -->|valid| saveMemory --> graphOutput
         validate -->|repair| assemble
-        validate -->|fallback| fallback
+        validate -->|fallback| fallback --> graphOutput
     end
 
-    subgraph tools["工具层"]
-        amapClient["共享 Amap MCP client"]
+    subgraph serviceLayer["服务和工具层"]
+        direction TB
+        amapClient["Amap MCP client"]
         amapServer["Amap MCP server"]
         amapApi["Amap 外部 API"]
-        amapClient --> amapServer
-        amapServer --> amapApi
+        llmService["LLMService<br/>OpenAI compatible"]
+        amapClient --> amapServer --> amapApi
     end
 
-    subgraph memory["记忆层"]
+    subgraph memoryLayer["记忆层"]
+        direction TB
         working["Working memory<br/>InMemorySaver"]
         store["Long-term memory<br/>PostgresStore"]
         semantic["Semantic memories"]
@@ -72,19 +82,215 @@ flowchart TB
         store --> embedding
     end
 
-    api --> health
-    api --> planApi
-    api --> memoryApi
-    travelPlannerGraph --> init
-    init --> working
-    loadMemory --> store
-    attraction --> amapClient
-    weather --> amapClient
-    hotel --> amapClient
-    saveMemory --> store
-    saveMemory --> response["TripPlan 响应"]
-    fallback --> response
+    fastapi --> health
+    fastapi --> planApi
+    fastapi --> memoryApi
+    planApi --> schema --> session --> graphStart
+    init -.-> working
+    loadMemory -.-> store
+    saveMemory -.-> store
+    attraction -.-> amapClient
+    weather -.-> amapClient
+    hotel -.-> amapClient
+    planner -.-> llmService
+    fallback -.-> llmService
+    graphOutput --> response["TripPlan 响应"]
     response --> client
+```
+
+## Pydantic 数据结构
+
+```mermaid
+classDiagram
+    direction TB
+
+    class TripPlanRequest {
+        +str user_id
+        +list~str~ cities
+        +date start_date
+        +date end_date
+        +TripPreferencesInput preferences
+        +Optional~int~ budget
+        +str extra_requirements
+        +Optional~str~ session_id
+    }
+
+    class TripPreferencesInput {
+        +TransportPreference transport_preference
+        +list~AccommodationPreference~ accommodation_preference
+        +list~AttractionPreference~ attraction_preference
+    }
+
+    class TripPlan {
+        +str session_id
+        +list~str~ cities
+        +date start_date
+        +date end_date
+        +list~DayPlan~ days
+        +list~WeatherInfo~ weather_info
+        +str overall_suggestions
+        +Optional~str~ generated_at
+    }
+
+    class DayPlan {
+        +date date
+        +int day_index
+        +str city
+        +str description
+        +str transportation
+        +str accommodation
+        +Optional~Hotel~ hotel
+        +list~Attraction~ attractions
+        +list~Meal~ meals
+        +list~MapPoint~ map_points
+        +int total_price
+        +Optional~float~ route_distance_km
+        +Optional~int~ route_duration_minutes
+        +Optional~str~ transit_method
+    }
+
+    class Attraction {
+        +str name
+        +Optional~str~ city
+        +str address
+        +Optional~Location~ location
+        +int visit_duration
+        +str description
+        +str category
+        +Optional~float~ rating
+        +Optional~str~ image_url
+        +int ticket_price
+        +Optional~str~ poi_id
+        +Optional~int~ order_index
+        +Optional~str~ source
+    }
+
+    class Hotel {
+        +str name
+        +Optional~str~ city
+        +str address
+        +Optional~Location~ location
+        +str price_range
+        +Optional~float~ rating
+        +str distance
+        +str type
+        +int estimated_cost
+        +Optional~str~ poi_id
+        +Optional~float~ distance_to_main_area_km
+        +Optional~int~ estimated_travel_time_minutes
+        +Optional~str~ transit_method
+        +Optional~str~ source
+    }
+
+    class Meal {
+        +MealType type
+        +str name
+        +Optional~str~ city
+        +Optional~str~ address
+        +Optional~Location~ location
+        +Optional~str~ description
+        +int estimated_cost
+    }
+
+    class WeatherInfo {
+        +str city
+        +date date
+        +str day_weather
+        +str night_weather
+        +int day_temp
+        +int night_temp
+        +str wind_direction
+        +str wind_power
+    }
+
+    class MapPoint {
+        +str name
+        +Optional~str~ city
+        +Location location
+        +Optional~int~ day_index
+        +Optional~int~ order_index
+        +str point_type
+    }
+
+    class Location {
+        +float longitude
+        +float latitude
+    }
+
+    class NormalizedTripRequest {
+        +str user_id
+        +list~str~ cities
+        +date start_date
+        +date end_date
+        +int days_count
+        +str transport_preference
+        +list~str~ accommodation_preferences
+        +list~str~ attraction_preferences
+        +Optional~int~ budget
+        +str extra_requirements
+        +str session_id
+    }
+
+    class AttractionSearchResult {
+        +list~Attraction~ attractions
+        +list~str~ search_keywords
+        +list~str~ step_observations
+        +Optional~SearchQuality~ quality
+    }
+
+    class HotelSearchResult {
+        +Optional~Hotel~ selected_hotel
+        +list~Hotel~ candidate_hotels
+        +list~str~ search_areas
+        +list~str~ ranking_reasons
+        +list~str~ step_observations
+        +Optional~SearchQuality~ quality
+    }
+
+    class SearchQuality {
+        +bool enough_results
+        +int result_count
+        +str reason
+        +bool retry_suggested
+        +list~str~ next_keywords
+    }
+
+    class MemoryCandidate {
+        +MemoryTarget target
+        +str text
+        +str reason
+        +float confidence
+        +dict metadata
+    }
+
+    class WorkingMemoryMaintenanceResult {
+        +list~Any~ retained_messages
+        +list~MemoryCandidate~ extracted_candidates
+        +int dropped_count
+    }
+
+    note for TripPlanRequest "validators: cities, date_range, session_id normalization"
+    note for TripPlan "validators: session_id, date_range, days_count"
+    note for DayPlan "validator: exactly one breakfast, lunch, dinner"
+    note for WeatherInfo "validator: provider temperature string parsing"
+
+    TripPlanRequest *-- TripPreferencesInput : preferences
+    TripPlanRequest ..> NormalizedTripRequest : normalized_to
+    TripPlan *-- DayPlan : days
+    TripPlan *-- WeatherInfo : weather_info
+    DayPlan o-- Hotel : hotel
+    DayPlan *-- Attraction : attractions
+    DayPlan *-- Meal : meals
+    DayPlan *-- MapPoint : map_points
+    Attraction o-- Location : location
+    Hotel o-- Location : location
+    Meal o-- Location : location
+    MapPoint *-- Location : location
+    AttractionSearchResult *-- Attraction : attractions
+    AttractionSearchResult o-- SearchQuality : quality
+    HotelSearchResult o-- Hotel : hotels
+    HotelSearchResult o-- SearchQuality : quality
+    WorkingMemoryMaintenanceResult *-- MemoryCandidate : extracted
 ```
 
 ## 实施原则
