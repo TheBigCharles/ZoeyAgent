@@ -44,22 +44,26 @@ flowchart TB
         amapServer["Amap MCP server"]
         amapApi["Amap API"]
         shortTerm["Short-term memory (Checkpointer)<br/>保存当前会话状态<br/>InMemorySaver"]
+        memoryPromotion["Memory promotion<br/>将重要会话内容沉淀为长期记忆"]
         longTerm["Long-term memory (Store)<br/>跨会话复用记忆<br/>PostgresStore"]
-        llmService["LLMService<br/>统一模型调用入口<br/>OpenAI compatible"]
         semanticStore["Semantic memory<br/>保存稳定偏好"]
         episodicStore["Episodic memory<br/>保存历史决策"]
         embeddings["Embeddings<br/>让记忆可语义检索<br/>BAAI/bge-m3"]
+        llmService["LLMService<br/>统一模型调用入口<br/>OpenAI compatible"]
         attractionBridge --> amapClient
         amapClient --> amapServer
         amapServer --> amapApi
+        shortTerm -.-> memoryPromotion
+        memoryPromotion -.-> longTerm
         longTerm --> semanticStore
         longTerm --> episodicStore
         longTerm --> embeddings
+        embeddings ~~~ llmService
     end
 
     init -.-> shortTerm
     loadMemory -.-> longTerm
-    saveMemory -.-> longTerm
+    saveMemory -.-> memoryPromotion
     contextBundle -.-> attractionBridge
     planner -.-> llmService
     fallback -.-> llmService
@@ -75,7 +79,7 @@ flowchart TB
     class client,fastapi,api entry
     class requestContract,sessionResolver contract
     class graphStart,init,loadMemory,normalize,contextBundle,assemble,planner,validate,saveMemory,fallback graphNode
-    class shortTerm,longTerm,semanticStore,episodicStore,embeddings,llmService,amapClient,amapServer,amapApi,attractionBridge deps
+    class shortTerm,memoryPromotion,longTerm,semanticStore,episodicStore,embeddings,llmService,amapClient,amapServer,amapApi,attractionBridge deps
     class tripPlan,response output
 ```
 
