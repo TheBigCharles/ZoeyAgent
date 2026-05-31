@@ -5,8 +5,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter
 
-from app.models.domain import DayPlan, Meal
-from app.models.trip import TripPlan, TripPlanRequest
+from app.schemas.domain import DayPlan, Meal
+from app.schemas.trip import TripPlan, TripPlanRequest
 
 router = APIRouter(prefix="/api/trip", tags=["trip"])
 

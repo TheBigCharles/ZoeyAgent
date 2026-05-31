@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.models.trip import TripPlan
+from app.schemas.trip import TripPlan
 
 
 def minimal_trip_request() -> dict:

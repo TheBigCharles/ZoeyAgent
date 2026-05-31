@@ -7,7 +7,7 @@ from enum import IntEnum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.models.domain import (
+from app.schemas.domain import (
     Attraction,
     DayPlan,
     Hotel,
