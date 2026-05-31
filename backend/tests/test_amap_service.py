@@ -1,0 +1,205 @@
+import asyncio
+from datetime import date
+
+from app.config import Settings
+from app.services.amap_service import AmapMCPService
+
+
+class FakeMCPClient:
+    def __init__(self, responses: dict[str, dict]):
+        self.responses = responses
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        return self.responses[name]
+
+
+def test_settings_use_real_amap_mcp_stdio_defaults_and_api_key_name() -> None:
+    settings = Settings(AMAP_MAPS_API_KEY="test-key")
+
+    assert settings.amap_api_key == "test-key"
+    assert settings.amap_mcp_command == "amap-mcp-server"
+    assert settings.amap_mcp_args == ""
+
+
+def test_search_attractions_uses_maps_text_search_and_normalizes_pois() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_text_search": {
+                "pois": [
+                    {
+                        "id": "B000A8UIN8",
+                        "name": "故宫博物院",
+                        "cityname": "北京市",
+                        "address": "景山前街4号",
+                        "location": "116.397128,39.916527",
+                        "type": "风景名胜;博物馆",
+                        "biz_ext": {"rating": "4.8", "cost": "60"},
+                    }
+                ]
+            }
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    attractions = asyncio.run(service.search_attractions(keywords="故宫", city="北京"))
+
+    assert fake_client.calls == [
+        ("maps_text_search", {"keywords": "故宫", "city": "北京", "citylimit": "true"})
+    ]
+    assert attractions[0].name == "故宫博物院"
+    assert attractions[0].city == "北京市"
+    assert attractions[0].location is not None
+    assert attractions[0].location.longitude == 116.397128
+    assert attractions[0].location.latitude == 39.916527
+    assert attractions[0].rating == 4.8
+    assert attractions[0].ticket_price == 60
+    assert attractions[0].poi_id == "B000A8UIN8"
+    assert attractions[0].source == "amap"
+
+
+def test_search_hotels_uses_maps_text_search_and_normalizes_candidates() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_text_search": {
+                "pois": [
+                    {
+                        "id": "H001",
+                        "name": "北京测试酒店",
+                        "cityname": "北京市",
+                        "address": "测试路1号",
+                        "location": "116.400000,39.900000",
+                        "type": "住宿服务;宾馆酒店",
+                        "distance": "1200",
+                        "biz_ext": {"rating": "4.6", "cost": "520"},
+                    }
+                ]
+            }
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    hotels = asyncio.run(service.search_hotels(keywords="酒店", city="北京"))
+
+    assert fake_client.calls == [
+        ("maps_text_search", {"keywords": "酒店", "city": "北京", "citylimit": "true"})
+    ]
+    assert hotels[0].name == "北京测试酒店"
+    assert hotels[0].rating == 4.6
+    assert hotels[0].estimated_cost == 520
+    assert hotels[0].distance == "1200"
+    assert hotels[0].source == "amap"
+
+
+def test_get_weather_uses_maps_weather_and_normalizes_forecast_casts() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_weather": {
+                "forecasts": [
+                    {
+                        "city": "北京市",
+                        "casts": [
+                            {
+                                "date": "2026-06-10",
+                                "dayweather": "晴",
+                                "nightweather": "多云",
+                                "daytemp": "28",
+                                "nighttemp": "18",
+                                "daywind": "东",
+                                "daypower": "≤3",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    weather = asyncio.run(service.get_weather(city="北京"))
+
+    assert fake_client.calls == [("maps_weather", {"city": "北京"})]
+    assert weather[0].city == "北京市"
+    assert weather[0].date == date(2026, 6, 10)
+    assert weather[0].day_weather == "晴"
+    assert weather[0].night_weather == "多云"
+    assert weather[0].day_temp == 28
+    assert weather[0].night_temp == 18
+    assert weather[0].wind_direction == "东"
+    assert weather[0].wind_power == "≤3"
+
+
+def test_get_weather_normalizes_amap_mcp_top_level_forecasts() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_weather": {
+                "city": "北京市",
+                "forecasts": [
+                    {
+                        "date": "2026-06-01",
+                        "dayweather": "多云",
+                        "nightweather": "阴",
+                        "daytemp": "34",
+                        "nighttemp": "18",
+                        "daywind": "南",
+                        "daypower": "1-3",
+                    }
+                ],
+            }
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    weather = asyncio.run(service.get_weather(city="北京"))
+
+    assert len(weather) == 1
+    assert weather[0].city == "北京市"
+    assert weather[0].date == date(2026, 6, 1)
+    assert weather[0].day_weather == "多云"
+
+
+def test_get_route_summary_uses_address_direction_tool_and_drops_detailed_steps() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_direction_driving_by_address": {
+                "route": {
+                    "paths": [
+                        {
+                            "distance": "12500",
+                            "duration": "1800",
+                            "steps": [{"instruction": "沿测试路行驶"}],
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    summary = asyncio.run(
+        service.get_route_summary(
+            origin_address="故宫博物院",
+            destination_address="颐和园",
+            mode="driving",
+            origin_city="北京",
+            destination_city="北京",
+        )
+    )
+
+    assert fake_client.calls == [
+        (
+            "maps_direction_driving_by_address",
+            {
+                "origin_address": "故宫博物院",
+                "destination_address": "颐和园",
+                "origin_city": "北京",
+                "destination_city": "北京",
+            },
+        )
+    ]
+    assert summary == {
+        "route_distance_km": 12.5,
+        "route_duration_minutes": 30,
+        "transit_method": "driving",
+    }

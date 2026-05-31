@@ -1,4 +1,4 @@
-# Tools Design
+﻿# Tools Design
 
 This document describes the external tool integration design for the travel planning assistant.
 
@@ -32,16 +32,16 @@ Reasoning:
 
 Use a shared Amap MCP server instance.
 
-The backend acts as the MCP client. The Amap MCP server runs as a separate process and is started once by the backend service. Communication happens through the MCP transport supported by the launcher, commonly stdio for local process-based MCP servers. If the selected MCP runtime exposes HTTP instead, the same tool boundary still applies.
+The backend acts as the MCP client. The Amap MCP server runs through stdio for the MVP and is owned by one shared `AmapMCPService` instance. The service may open the stdio session lazily on the first real tool call, but all Amap calls should still go through the same service boundary.
 
 Conceptual setup:
 
 ```python
 mcp_tool = MCPTool(
     name="amap_mcp",
-    command="npx",
-    args=["-y", "@sugarforever/amap-mcp-server"],
-    env={"AMAP_API_KEY": settings.amap_api_key},
+    command="amap-mcp-server",
+    args=[],
+    env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
     auto_expand=True,
 )
 ```
@@ -68,7 +68,7 @@ LangGraph node/subgraph
 The reference material shows HelloAgents parsing string markers such as:
 
 ```text
-[TOOL_CALL:amap_maps_text_search:keywords=景点,city=北京]
+[TOOL_CALL:maps_text_search:keywords=景点,city=北京]
 ```
 
 This project should not depend on string tool-call markers inside prompts. In the LangGraph design, graph nodes/subgraphs call the tool wrapper directly or through structured tool-calling. The MCP server and Amap API usage are the same; only the agent-tool invocation style is different.
@@ -93,22 +93,27 @@ Consumers:
 
 ## Amap Tool Usage
 
-Expected MCP tools:
+MVP required MCP tools:
 
-- `amap_maps_text_search`
-- `amap_maps_search_detail`
-- `amap_maps_around_search`
-- `amap_maps_weather`
-- `amap_maps_direction_walking_by_address`
-- `amap_maps_direction_driving_by_address`
-- `amap_maps_direction_transit_integrated_by_address`
-- `amap_maps_geocode`
-- `amap_maps_regeocode`
+- `maps_text_search`
+- `maps_weather`
+- `maps_direction_walking_by_address`
+- `maps_direction_driving_by_address`
+- `maps_direction_transit_integrated_by_address`
+
+Future optional MCP tools:
+
+- `maps_search_detail`
+- `maps_around_search`
+- `maps_geo`
+- `maps_regeocode`
+- `maps_geo`
+- `maps_regeocode`
 
 MVP usage:
 
-- Attraction and hotel search use `amap_maps_text_search`.
-- Weather uses `amap_maps_weather`.
+- Attraction and hotel search use `maps_text_search`.
+- Weather uses `maps_weather`.
 - Search detail, around search, geocode, and regeocode are available to specialist subgraphs for step-level search refinement, radius expansion, parking checks, approximate coordinate-distance checks, and richer POI normalization.
 - Direction tools may be used for lightweight route summary signals such as distance, estimated time, and transport mode. Full route instructions are deferred for the MVP.
 
@@ -121,13 +126,13 @@ Consumer:
 Tool:
 
 ```text
-amap_maps_text_search
-amap_maps_search_detail
-amap_maps_around_search
-amap_maps_geocode
-amap_maps_direction_walking_by_address
-amap_maps_direction_driving_by_address
-amap_maps_direction_transit_integrated_by_address
+maps_text_search
+maps_search_detail
+maps_around_search
+maps_geo
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
 ```
 
 Inputs:
@@ -151,9 +156,9 @@ The attraction subgraph is a local Plan-and-Solve workflow. Its per-step ReAct e
 
 Optional refinements:
 
-- `amap_maps_search_detail` can enrich selected POIs.
-- `amap_maps_around_search` can find nearby attractions or restaurants once a location is known.
-- `amap_maps_geocode` can convert addresses to coordinates if POI search lacks usable coordinates.
+- `maps_search_detail` can enrich selected POIs.
+- `maps_around_search` can find nearby attractions or restaurants once a location is known.
+- `maps_geo` can convert addresses to coordinates if POI search lacks usable coordinates.
 - Direction tools can estimate lightweight distance/time/mode between candidate attractions or from hotel anchors, but should not return step-by-step route instructions.
 
 ### Weather Query
@@ -165,7 +170,7 @@ Consumer:
 Tool:
 
 ```text
-amap_maps_weather
+maps_weather
 ```
 
 Inputs:
@@ -193,12 +198,12 @@ Consumer:
 Tool:
 
 ```text
-amap_maps_text_search
-amap_maps_around_search
-amap_maps_geocode
-amap_maps_direction_walking_by_address
-amap_maps_direction_driving_by_address
-amap_maps_direction_transit_integrated_by_address
+maps_text_search
+maps_around_search
+maps_geo
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
 ```
 
 Inputs:
@@ -230,8 +235,8 @@ Important limitation:
 
 Optional refinements:
 
-- `amap_maps_around_search` can search near selected attraction clusters.
-- `amap_maps_around_search` can search for nearby parking lots when the trip uses driving.
+- `maps_around_search` can search near selected attraction clusters.
+- `maps_around_search` can search for nearby parking lots when the trip uses driving.
 - Direction tools can estimate public transit suitability, walkability, and driving convenience as summary signals.
 - Direction tool outputs should be reduced to distance, estimated duration, and transport mode. Do not expose detailed route steps such as bus line, station count, turn-by-turn walking, or driving instructions in the MVP response.
 
@@ -242,11 +247,11 @@ Route and geocoding tools are part of the Amap MCP server. The MVP may use them 
 OCR source table confirms the available Amap MCP route/geocoding tools:
 
 ```text
-amap_maps_direction_walking_by_address
-amap_maps_direction_driving_by_address
-amap_maps_direction_transit_integrated_by_address
-amap_maps_geocode
-amap_maps_regeocode
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
+maps_geo
+maps_regeocode
 ```
 
 Allowed MVP use:
@@ -415,7 +420,7 @@ Do not store full raw provider responses in working memory unless needed for deb
 Expected environment variables:
 
 ```text
-AMAP_API_KEY=...
+AMAP_MAPS_API_KEY=...
 UNSPLASH_ACCESS_KEY=...
 ENABLE_IMAGE_ENRICHMENT=false
 ```
@@ -423,8 +428,8 @@ ENABLE_IMAGE_ENRICHMENT=false
 MCP command configuration:
 
 ```text
-AMAP_MCP_COMMAND=npx
-AMAP_MCP_ARGS=-y @sugarforever/amap-mcp-server
+AMAP_MCP_COMMAND=amap-mcp-server
+AMAP_MCP_ARGS=
 ```
 
 The command can later be changed to another MCP launcher if needed.

@@ -336,12 +336,15 @@ flowchart TB
    - 验证方式：用固定 state 测试上下文来源过滤、重要性排序、压缩开关和 planner context sections。
 
 8. 封装 Amap MCP tool 和归一化层
-   - 在 `services/amap_service.py` 中建立共享 Amap MCP client 封装，整个后端只启动或连接一个 Amap MCP server。
-   - 实现坐标、评分、价格、天气温度、geocode/regeocode 和 route summary 的 provider response normalization。
+   - 使用 MCP Python client，通过 stdio 连接已安装的 `sugarforever/amap-mcp-server`。
+   - 默认启动配置为 `AMAP_MCP_COMMAND=amap-mcp-server`、`AMAP_MCP_ARGS=`，密钥环境变量为 `AMAP_MAPS_API_KEY`。
+   - 在 `services/amap_service.py` 中建立共享 Amap MCP client 封装，整个后端通过同一个服务边界调用地图工具。
+   - 先接入真实 MCP 工具名：`maps_text_search`、`maps_weather`、`maps_direction_walking_by_address`、`maps_direction_driving_by_address`、`maps_direction_transit_integrated_by_address`。
+   - 实现坐标、评分、价格、天气温度和 route summary 的 provider response normalization。
    - direction tool 输出只保留距离、耗时和交通方式，不返回公交站数、换乘细节或 turn-by-turn 路线。
    - 保证 raw Amap 响应不会直接进入 `PlannerNode`。
-   - 先用 sample response 和 fake MCP client，不要求一开始连真实 Amap。
-   - 验证方式：用 Amap sample response 测试 normalize 结果，不要求一开始连真实 Amap。
+   - 先用 fake MCP client 和 sample response 验证，不要求一开始连真实 Amap。
+   - 验证方式：用 fake MCP response 测试 POI、weather 和 route summary normalize 结果，不要求一开始连真实 Amap。
 
 9. 接入天气节点
    - 实现 `WeatherQueryNode` 调用 Amap weather 工具。
