@@ -226,6 +226,61 @@ flowchart TB
     class configHub,contextConfig,contextProfile,promptTemplate,llmNodeSpec,specialistConfig config
 ```
 
+## 组件职责速览
+
+**HTTP 边界**
+
+- FastAPI 应用：承接 HTTP 请求，负责路由注册、应用生命周期和依赖注入边界。
+- API routes：只处理 HTTP 入参、`session_id` 解析、调用 graph 和返回响应，不直接承担规划逻辑。
+- `TripPlanRequest`：表示前端提交的原始规划表单，例如城市、日期、偏好索引、预算和可选 `session_id`。
+- `SessionResolver`：把可选 `session_id` 变成 graph 必需的非空 `thread_id`；例如首次请求生成 UUID，后续请求复用前端传回的值。
+
+**Graph 运行现场**
+
+- `TravelPlanState`：保存一次 graph run 的完整运行现场，包括请求、工具结果、记忆召回、上下文、草稿、最终计划和校验状态。
+- Working memory：保存当前 session 的临时上下文，只服务会话连续性；例如用户刚说“不要太赶”和最近的工具调用摘要。
+- `working_messages`：保存当前 session 中对后续规划有用的消息片段，不保存完整长期历史。
+- `tool_observations`：保存工具调用过程的简短摘要；例如“Amap 搜索北京历史文化返回 18 个 POI，保留 9 个”。
+- `attraction_search_result`：保存景点搜索的结构化候选结果，供酒店搜索和 Planner 使用；例如景点列表、关键词、质量评估。
+- `hotel_search_result`：保存酒店搜索的结构化候选结果，供 Planner 选择住宿；例如 selected hotel、candidate hotels、ranking reasons。
+- `weather_info`：保存天气节点归一化后的天气数据，供 Planner 安排室内外行程。
+
+**记忆系统**
+
+- Long-term memory：保存跨 session 仍然有价值的信息，不保存临时工具原始结果。
+- Semantic memory：保存稳定偏好或事实；例如“用户偏好轻松节奏”。
+- Episodic memory：保存具体历史决策或事件；例如“用户上次拒绝了离景点太远的酒店”。
+- `MemoryExtractionService`：从 working memory overflow 或最终有效行程中抽取候选记忆，并分类为 semantic、episodic 或 discard。
+
+**上下文和模型调用**
+
+- `ContextAssembler`：从 state、working memory、长期记忆和工具结果中挑选最有价值的信息，组装给 LLM 的 prompt context。
+- `ContextAssemblyNode`：在主规划链路中为 `PlannerNode` 生成 planner context，不负责调用外部工具。
+- `LLMService`：封装 OpenAI-compatible 模型调用入口，包括普通调用、tool calling 和 stream。
+- `LLMNodeSpec`：描述一个 LLM 节点用哪个 context profile、prompt template 和 output schema，避免 prompt 调用散落在代码里。
+
+**外部工具**
+
+- Amap MCP client：后端统一访问 Amap MCP server 的工具入口，避免每个子图各自启动工具进程。
+- Amap MCP server：连接真实 Amap API 的外部工具服务，提供 POI、天气、地理编码和路线 summary 能力。
+
+**规划节点**
+
+- `AttractionSearchSubgraph`：只负责搜索、去重、排序和评估景点候选，不生成最终行程。
+- `WeatherQueryNode`：只负责按城市和日期查询天气，不需要 LLM。
+- `HotelSearchSubgraph`：只负责基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
+- `PlannerNode`：使用 planner context 生成可渲染的 `TripPlan` 草稿。
+- `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、每日三餐、价格和 map points。
+- `SaveMemoryNode`：只在 `TripPlan` 校验成功后保存长期记忆，避免把无效计划写入 memory。
+- `FallbackNode`：在多次 repair 失败后返回保守可控的结果或结构化错误，避免 graph 无限重试。
+- `TripPlan`：最终返回给前端直接渲染的响应模型，包含 resolved `session_id`、每日行程、天气和整体建议。
+
+容易混淆的关系：
+
+- `TravelPlanState` 是完整运行现场，Working memory 是其中负责当前会话连续性的部分。
+- `attraction_search_result` 和 `tool_observations` 来自同一批工具调用，但前者是结构化候选数据，后者是过程摘要。
+- Working memory 可以被提升为 Semantic/Episodic memory，但只有长期有价值的内容才会被保存。
+
 ## 实施原则
 
 实施过程应该是递进式的：每一步都在已有结果上继续增加能力，不能为了进入下一步而推翻、重写或回退上一阶段已经跑通的行为。需要调整设计时，应通过兼容层、适配器、迁移脚本或小范围重构向前演进。
