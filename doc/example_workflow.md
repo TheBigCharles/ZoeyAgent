@@ -1,4 +1,4 @@
-# Example Workflow: Hangzhou Driving Trip
+﻿# Example Workflow: Hangzhou Driving Trip
 
 This example follows the current agents design exactly. It shows what each graph step does, which tools may be called, what output is expected, and when memory is saved.
 
@@ -167,13 +167,13 @@ What it does:
 Tools that may be called:
 
 ```text
-amap_maps_text_search
-amap_maps_search_detail
-amap_maps_around_search
-amap_maps_geocode
-amap_maps_direction_walking_by_address
-amap_maps_direction_driving_by_address
-amap_maps_direction_transit_integrated_by_address
+maps_text_search
+maps_search_detail
+maps_around_search
+maps_geo
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
 ```
 
 Direction tools are only used for summary signals:
@@ -243,7 +243,7 @@ What it does:
 Tools called:
 
 ```text
-amap_maps_weather
+maps_weather
 ```
 
 Expected output:
@@ -318,12 +318,12 @@ What it does:
 Tools that may be called:
 
 ```text
-amap_maps_text_search
-amap_maps_around_search
-amap_maps_geocode
-amap_maps_direction_walking_by_address
-amap_maps_direction_driving_by_address
-amap_maps_direction_transit_integrated_by_address
+maps_text_search
+maps_around_search
+maps_geo
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
 ```
 
 Expected route summary signals:
