@@ -8,9 +8,9 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
 
-from app.models.domain import Attraction, Hotel, WeatherInfo
-from app.models.memory import MemoryCandidate
-from app.models.trip import TripPlan, TripPlanRequest
+from app.schemas.domain import Attraction, Hotel, WeatherInfo
+from app.schemas.memory import MemoryCandidate
+from app.schemas.trip import TripPlan, TripPlanRequest
 
 
 class ContextPacket(BaseModel):

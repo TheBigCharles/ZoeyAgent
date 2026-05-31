@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from app.models.domain import (
+from app.schemas.domain import (
     Attraction,
     DayPlan,
     Hotel,
@@ -12,7 +12,7 @@ from app.models.domain import (
     MapPoint,
     WeatherInfo,
 )
-from app.models.trip import (
+from app.schemas.trip import (
     AccommodationPreference,
     AttractionPreference,
     TransportPreference,

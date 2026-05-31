@@ -6,7 +6,7 @@ methods for attraction, hotel, weather, geocoding, and route-summary calls.
 
 from dataclasses import dataclass
 
-from app.config import Settings
+from app.core.config import Settings
 
 
 @dataclass(slots=True)
