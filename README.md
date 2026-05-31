@@ -99,122 +99,60 @@ flowchart TB
 公共 API 和前端渲染合同：
 
 ```mermaid
-erDiagram
-    TRIP_PLAN_REQUEST ||--|| TRIP_PREFERENCES_INPUT : uses
-    TRIP_PLAN ||--|{ DAY_PLAN : contains
-    TRIP_PLAN ||--o{ WEATHER_INFO : includes
-    DAY_PLAN ||--o| HOTEL : selects
-    DAY_PLAN ||--o{ ATTRACTION : visits
-    DAY_PLAN ||--|{ MEAL : includes
-    DAY_PLAN ||--o{ MAP_POINT : renders
-    ATTRACTION }o--o| LOCATION : may_have
-    HOTEL }o--o| LOCATION : may_have
-    MEAL }o--o| LOCATION : may_have
-    MAP_POINT ||--|| LOCATION : requires
+flowchart TB
+    subgraph requestSide["Request contracts"]
+        direction TB
+        tripReq["TripPlanRequest<br/>生成行程输入<br/>&bull; user_id, cities, dates<br/>&bull; preferences, budget optional<br/>&bull; extra_requirements<br/>&bull; session_id optional"]
+        prefs["TripPreferencesInput<br/>前端枚举索引<br/>&bull; transport_preference<br/>&bull; accommodation_preference<br/>&bull; attraction_preference"]
+        enums["Preference enums<br/>后端转英文值<br/>&bull; TransportPreference<br/>&bull; AccommodationPreference<br/>&bull; AttractionPreference"]
+        recalcReq["TripRecalculateRequest<br/>预留重算合同<br/>&bull; user_id<br/>&bull; session_id optional<br/>&bull; trip_plan<br/>&bull; edit_reason optional"]
+    end
 
-    TRIP_PLAN_REQUEST {
-        string user_id
-        list cities
-        date start_date
-        date end_date
-        int budget_optional
-        string extra_requirements
-        string session_id_optional
-    }
+    planEndpoint["POST /api/trip/plan<br/>请求进来，TripPlan 出去"]
+    recalcEndpoint["POST /api/trip/recalculate<br/>预留编辑和重算入口"]
 
-    TRIP_PREFERENCES_INPUT {
-        int transport_preference
-        list accommodation_preference
-        list attraction_preference
-    }
+    subgraph responseSide["Response contract"]
+        direction TB
+        tripPlanPublic["TripPlan<br/>前端直接渲染<br/>&bull; session_id<br/>&bull; cities, start_date, end_date<br/>&bull; days<br/>&bull; weather_info<br/>&bull; overall_suggestions<br/>&bull; generated_at optional"]
+        dayPlan["DayPlan<br/>每日渲染单位<br/>&bull; date, day_index, city<br/>&bull; description<br/>&bull; transportation, accommodation<br/>&bull; hotel, attractions, meals, map_points<br/>&bull; total_price<br/>&bull; route summary optional"]
+        weatherInfo["WeatherInfo<br/>天气块<br/>&bull; city, date<br/>&bull; day_weather, night_weather<br/>&bull; day_temp, night_temp<br/>&bull; wind_direction, wind_power"]
+    end
 
-    TRIP_PLAN {
-        string session_id
-        list cities
-        date start_date
-        date end_date
-        list days
-        list weather_info
-        string overall_suggestions
-        string generated_at_optional
-    }
+    subgraph dailyModels["Daily detail models"]
+        direction LR
+        attractionModel["Attraction<br/>景点<br/>&bull; name, city, address<br/>&bull; location optional<br/>&bull; visit_duration, rating optional<br/>&bull; ticket_price, poi_id optional<br/>&bull; order_index optional"]
+        hotelModel["Hotel<br/>酒店<br/>&bull; name, city, address<br/>&bull; location optional<br/>&bull; price_range, rating optional<br/>&bull; estimated_cost<br/>&bull; distance and travel time optional"]
+        mealModel["Meal<br/>餐食<br/>&bull; type: breakfast lunch dinner<br/>&bull; name, city optional<br/>&bull; address optional<br/>&bull; location optional<br/>&bull; estimated_cost"]
+        mapPointModel["MapPoint<br/>地图点<br/>&bull; name, city optional<br/>&bull; location required<br/>&bull; day_index optional<br/>&bull; order_index optional<br/>&bull; point_type"]
+        locationModel["Location<br/>经纬度<br/>&bull; longitude<br/>&bull; latitude"]
+    end
 
-    DAY_PLAN {
-        date date
-        int day_index
-        string city
-        string description
-        string transportation
-        string accommodation
-        int total_price
-        float route_distance_km_optional
-        int route_duration_minutes_optional
-        string transit_method_optional
-    }
+    tripReq --> prefs --> enums
+    tripReq --> planEndpoint --> tripPlanPublic
+    recalcReq --> recalcEndpoint
+    recalcReq -.-> tripPlanPublic
+    tripPlanPublic --> dayPlan
+    tripPlanPublic --> weatherInfo
+    dayPlan --> attractionModel
+    dayPlan --> hotelModel
+    dayPlan --> mealModel
+    dayPlan --> mapPointModel
+    attractionModel -.-> locationModel
+    hotelModel -.-> locationModel
+    mealModel -.-> locationModel
+    mapPointModel --> locationModel
 
-    ATTRACTION {
-        string name
-        string city_optional
-        string address
-        int visit_duration
-        string description
-        string category
-        float rating_optional
-        string image_url_optional
-        int ticket_price
-        string poi_id_optional
-        int order_index_optional
-        string source_optional
-    }
+    classDef api fill:#e7f5ff,stroke:#1971c2,color:#0b3558
+    classDef response fill:#d3f9d8,stroke:#2f9e44,color:#14351d
+    classDef domain fill:#f8f9fa,stroke:#868e96,color:#343a40
+    classDef enum fill:#fff4e6,stroke:#e67700,color:#5c3300
+    classDef endpoint fill:#c5f6fa,stroke:#0c8599,color:#073b43
 
-    HOTEL {
-        string name
-        string city_optional
-        string address
-        string price_range
-        float rating_optional
-        string distance
-        string type
-        int estimated_cost
-        string poi_id_optional
-        float distance_to_main_area_km_optional
-        int estimated_travel_time_minutes_optional
-        string transit_method_optional
-        string source_optional
-    }
-
-    MEAL {
-        string type
-        string name
-        string city_optional
-        string address_optional
-        string description_optional
-        int estimated_cost
-    }
-
-    WEATHER_INFO {
-        string city
-        date date
-        string day_weather
-        string night_weather
-        int day_temp
-        int night_temp
-        string wind_direction
-        string wind_power
-    }
-
-    MAP_POINT {
-        string name
-        string city_optional
-        int day_index_optional
-        int order_index_optional
-        string point_type
-    }
-
-    LOCATION {
-        float longitude
-        float latitude
-    }
+    class tripReq,prefs,recalcReq api
+    class planEndpoint,recalcEndpoint endpoint
+    class enums enum
+    class tripPlanPublic,dayPlan,weatherInfo response
+    class attractionModel,hotelModel,mealModel,mapPointModel,locationModel domain
 ```
 
 Graph 和 memory 内部合同：
@@ -226,35 +164,66 @@ flowchart TB
     normalize["NormalizeRequestNode<br/>请求归一化<br/>&bull; clean cities<br/>&bull; compute days_count<br/>&bull; enum index to English value<br/>&bull; keep budget and extra_requirements"]
     normalized["NormalizedTripRequest<br/>graph 内部输入<br/>&bull; user_id, cities, dates<br/>&bull; days_count<br/>&bull; transport_preference<br/>&bull; accommodation_preferences<br/>&bull; attraction_preferences<br/>&bull; budget optional<br/>&bull; extra_requirements<br/>&bull; session_id required"]
 
-    state["TravelPlanState<br/>LangGraph 共享状态<br/>&bull; request, normalized_request<br/>&bull; working_messages<br/>&bull; tool_observations<br/>&bull; planner_context<br/>&bull; trip_plan optional<br/>&bull; validation_errors<br/>&bull; retry_count"]
+    state["TravelPlanState<br/>LangGraph 共享状态<br/>&bull; request, normalized_request<br/>&bull; working_messages, trip_draft<br/>&bull; tool_observations<br/>&bull; semantic_memories, episodic_memories<br/>&bull; memory_candidates<br/>&bull; context_packets, planner_context<br/>&bull; attraction and hotel search results<br/>&bull; weather_info and flattened views<br/>&bull; trip_plan optional<br/>&bull; validation_errors, retry_count"]
 
-    context["ContextPacket<br/>压缩上下文片段<br/>&bull; content, timestamp<br/>&bull; token_count<br/>&bull; relevance, recency<br/>&bull; importance, confidence<br/>&bull; source, metadata"]
-    attractionResult["AttractionSearchResult<br/>景点搜索结果<br/>&bull; attractions<br/>&bull; search_keywords<br/>&bull; step_observations<br/>&bull; quality optional"]
-    hotelResult["HotelSearchResult<br/>酒店搜索结果<br/>&bull; selected_hotel optional<br/>&bull; candidate_hotels<br/>&bull; search_areas<br/>&bull; ranking_reasons<br/>&bull; step_observations<br/>&bull; quality optional"]
-    quality["SearchQuality<br/>搜索质量评估<br/>&bull; enough_results<br/>&bull; result_count<br/>&bull; retry_suggested<br/>&bull; next_keywords"]
-    memoryCandidate["MemoryCandidate<br/>候选长期记忆<br/>&bull; target: semantic, episodic, discard<br/>&bull; text, reason<br/>&bull; confidence, metadata"]
-    maintenance["WorkingMemoryMaintenanceResult<br/>工作记忆维护结果<br/>&bull; retained_messages<br/>&bull; extracted_candidates<br/>&bull; dropped_count"]
+    subgraph runtimeData["Runtime state data"]
+        direction LR
+        runtimeHub["运行时写回 state<br/>工具结果、上下文、草稿和质量评估"]
+        context["ContextPacket<br/>上下文候选片段<br/>&bull; content, timestamp<br/>&bull; token_count<br/>&bull; relevance, recency<br/>&bull; importance, confidence<br/>&bull; source, metadata"]
+        attractionResult["AttractionSearchResult<br/>景点搜索结果<br/>&bull; attractions<br/>&bull; search_keywords<br/>&bull; step_observations<br/>&bull; quality optional"]
+        hotelResult["HotelSearchResult<br/>酒店搜索结果<br/>&bull; selected_hotel optional<br/>&bull; candidate_hotels<br/>&bull; search_areas<br/>&bull; ranking_reasons<br/>&bull; step_observations<br/>&bull; quality optional"]
+        quality["SearchQuality<br/>搜索质量评估<br/>&bull; enough_results<br/>&bull; result_count<br/>&bull; reason<br/>&bull; retry_suggested<br/>&bull; next_keywords"]
+    end
+
+    subgraph memoryData["Memory contracts"]
+        direction LR
+        memoryHub["记忆维护输出<br/>短期上下文留下，重要信息候选入长期记忆"]
+        memoryCandidate["MemoryCandidate<br/>候选长期记忆<br/>&bull; target: semantic, episodic, discard<br/>&bull; text, reason<br/>&bull; confidence, metadata"]
+        maintenance["WorkingMemoryMaintenanceResult<br/>工作记忆维护结果<br/>&bull; retained_messages<br/>&bull; extracted_candidates<br/>&bull; dropped_count"]
+    end
+
+    subgraph configData["Configuration schemas"]
+        direction LR
+        configHub["配置型 schema<br/>控制上下文预算、prompt 和搜索子图行为"]
+        contextConfig["ContextConfig<br/>上下文预算<br/>&bull; max_tokens, reserve_ratio<br/>&bull; min_relevance<br/>&bull; scoring weights<br/>&bull; enable_compression"]
+        contextProfile["ContextProfile<br/>节点上下文画像<br/>&bull; profile_name<br/>&bull; allowed_sources<br/>&bull; required_sections<br/>&bull; output_schema_name optional"]
+        promptTemplate["PromptTemplateSpec<br/>提示模板规格<br/>&bull; template_name<br/>&bull; role and task<br/>&bull; input_fields<br/>&bull; allowed_tools<br/>&bull; output_schema_name"]
+        llmNodeSpec["LLMNodeSpec<br/>LLM 节点规格<br/>&bull; node_name<br/>&bull; context_profile<br/>&bull; prompt_template<br/>&bull; output_schema_name"]
+        specialistConfig["SpecialistSearchConfig<br/>搜索子图规格<br/>&bull; planner executor evaluator prompts<br/>&bull; allowed_tools<br/>&bull; ranking_policy<br/>&bull; max_retries"]
+    end
+
     tripPlan["TripPlan<br/>最终响应模型<br/>&bull; session_id<br/>&bull; days<br/>&bull; weather_info<br/>&bull; overall_suggestions"]
 
     request --> session --> normalize --> normalized --> state
-    state --> context
-    state --> attractionResult
-    state --> hotelResult
-    state --> memoryCandidate
+    state --> runtimeHub
+    state --> memoryHub
     state --> tripPlan
+    runtimeHub --> context
+    runtimeHub --> attractionResult
+    runtimeHub --> hotelResult
     attractionResult --> quality
     hotelResult --> quality
+    memoryHub --> maintenance
     maintenance --> memoryCandidate
+    configHub -.-> normalize
+    configHub -.-> runtimeHub
+    configHub --> contextConfig
+    configHub --> contextProfile
+    configHub --> promptTemplate
+    configHub --> llmNodeSpec
+    configHub --> specialistConfig
 
     classDef api fill:#e7f5ff,stroke:#1971c2,color:#0b3558
     classDef transform fill:#fff4e6,stroke:#e67700,color:#5c3300
     classDef internal fill:#e5dbff,stroke:#5f3dc4,color:#2b174f
     classDef memory fill:#fff9db,stroke:#f08c00,color:#5c3d00
+    classDef config fill:#f8f9fa,stroke:#868e96,color:#343a40
 
     class request,tripPlan api
     class session,normalize transform
-    class normalized,state,context,attractionResult,hotelResult,quality internal
-    class memoryCandidate,maintenance memory
+    class normalized,state,runtimeHub,context,attractionResult,hotelResult,quality internal
+    class memoryHub,memoryCandidate,maintenance memory
+    class configHub,contextConfig,contextProfile,promptTemplate,llmNodeSpec,specialistConfig config
 ```
 
 ## 实施原则
