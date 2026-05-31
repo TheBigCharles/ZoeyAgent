@@ -323,10 +323,11 @@ flowchart TB
 
 6. 封装 LLM service 和 LLM 节点基础设施
    - 在 `agents/llm.py` 中封装 OpenAI-compatible chat completion。
-   - 支持普通非流式调用、function calling/tool calling、stream response 三类入口。
+   - 先实现普通非流式调用和非流式 function calling/tool calling。
+   - 保留 stream response 方法签名，但真实 streaming 推迟到 SSE/WebSocket 或进度 UI 阶段。
    - 图节点只依赖项目内部 `LLMService`，不直接散落调用 OpenAI SDK。
    - 建立 `PromptTemplateRegistry`、`BaseLLMNode`、structured output validation 和 retry policy skeleton。
-   - 验证方式：用 mock transport 或 fake client 测试 message、tools、stream chunk 的输入输出形状。
+   - 验证方式：用 mock transport 或 fake client 测试 message、tools 和 deferred stream 行为。
 
 7. 实现上下文组装层
    - 实现 reusable `ContextAssembler`，支持 `ContextProfile`、`PromptTemplateSpec` 和 token budget。
