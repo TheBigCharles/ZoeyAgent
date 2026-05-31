@@ -4,14 +4,14 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from app.agents.llm import (
+from app.services.llm_service import (
     BaseLLMNode,
     LLMService,
     PromptTemplateRegistry,
     RetryPolicy,
     validate_structured_output,
 )
-from app.core.config import Settings
+from app.config import Settings
 from app.schemas.graph import PromptTemplateSpec
 
 

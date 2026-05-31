@@ -2,8 +2,8 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from app.core.dependencies import AppDependencies
-from app.main import create_app
+from app.api.main import create_app
+from app.config import AppDependencies
 from app.schemas.domain import DayPlan, Meal
 from app.schemas.trip import TripPlan
 

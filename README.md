@@ -290,7 +290,7 @@ flowchart TB
 1. 建立项目骨架
    - 创建 `backend/app/` 目录、FastAPI 入口、配置模块和基础路由。
    - 先实现 `GET /health`，保证服务可以启动和被测试。
-   - 保留后续目录边界：`api`、`core`、`schemas`、`agents`、`memory`、`tools`。
+   - 保留后续目录边界：`api`、`schemas`、`agents`、`memory`、`services`、`config.py`。
    - 验证方式：启动 FastAPI app，并用 `curl /health` 确认返回 `{"status": "ok"}`。
 
 2. 实现 Pydantic 数据契约
@@ -315,14 +315,14 @@ flowchart TB
    - 验证方式：通过 `/api/trip/plan` 调用 mock graph，确认 endpoint 不再直接拼响应，而是从 graph 输出 `TripPlan`。
 
 5. 建立应用生命周期、依赖注入和错误边界
-   - 在 `core/config.py`、`core/dependencies.py` 中集中管理 settings、graph、checkpointer、store、Amap MCP client 和 LLM client。
+   - 在 `config.py` 中集中管理 settings、graph、checkpointer、store、Amap MCP client 和 LLM client。
    - 在 FastAPI startup/shutdown 中预留初始化和关闭外部资源的生命周期。
    - 引入结构化错误边界，例如 `GRAPH_EXECUTION_FAILED`、`TOOL_CALL_FAILED`、`PLAN_VALIDATION_FAILED`。
    - MVP 可以先保留 FastAPI 默认校验错误，但 graph/tool/planner 异常需要开始收口到统一错误形状。
    - 验证方式：用 fake dependency 覆盖 graph 成功、graph 抛错、配置缺失三类路径。
 
 6. 封装 LLM service 和 LLM 节点基础设施
-   - 在 `agents/llm.py` 中封装 OpenAI-compatible chat completion。
+   - 在 `services/llm_service.py` 中封装 OpenAI-compatible chat completion。
    - 先实现普通非流式调用和非流式 function calling/tool calling。
    - 保留 stream response 方法签名，但真实 streaming 推迟到 SSE/WebSocket 或进度 UI 阶段。
    - 图节点只依赖项目内部 `LLMService`，不直接散落调用 OpenAI SDK。
@@ -336,7 +336,7 @@ flowchart TB
    - 验证方式：用固定 state 测试上下文来源过滤、重要性排序、压缩开关和 planner context sections。
 
 8. 封装 Amap MCP tool 和归一化层
-   - 在 `tools/amap.py` 中建立共享 Amap MCP client 封装，整个后端只启动或连接一个 Amap MCP server。
+   - 在 `services/amap_service.py` 中建立共享 Amap MCP client 封装，整个后端只启动或连接一个 Amap MCP server。
    - 实现坐标、评分、价格、天气温度、geocode/regeocode 和 route summary 的 provider response normalization。
    - direction tool 输出只保留距离、耗时和交通方式，不返回公交站数、换乘细节或 turn-by-turn 路线。
    - 保证 raw Amap 响应不会直接进入 `PlannerNode`。

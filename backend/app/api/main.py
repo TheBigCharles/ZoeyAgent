@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from app.api.routes_health import router as health_router
-from app.api.routes_trip import router as trip_router
-from app.core.dependencies import DependencyFactory, create_app_dependencies
-from app.core.errors import StructuredAppError
+from app.api.routes.health import router as health_router
+from app.api.routes.map import router as map_router
+from app.api.routes.trip import router as trip_router
+from app.config import DependencyFactory, StructuredAppError, create_app_dependencies
 
 
 def create_app(dependency_factory: DependencyFactory = create_app_dependencies) -> FastAPI:
@@ -38,6 +38,7 @@ def create_app(dependency_factory: DependencyFactory = create_app_dependencies) 
 
     app.include_router(health_router)
     app.include_router(trip_router)
+    app.include_router(map_router)
     return app
 
 

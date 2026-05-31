@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 
 from app.agents.context import ContextAssembler, assemble_planner_context
-from app.agents.graph import build_travel_planner_graph
+from app.agents.trip_planner_agent import build_travel_planner_graph
 from app.schemas.graph import ContextConfig, ContextPacket, ContextProfile, PromptTemplateSpec, TravelPlanState
 from app.schemas.trip import TripPlanRequest, TripPreferencesInput
 

@@ -9,8 +9,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from app.core.errors import PLAN_VALIDATION_FAILED, StructuredAppError, exception_details
-from app.core.config import Settings
+from app.config import PLAN_VALIDATION_FAILED, Settings, StructuredAppError, exception_details
 from app.schemas.graph import PromptTemplateSpec
 
 

@@ -4,14 +4,15 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends
 
-from app.agents.graph import build_initial_state
-from app.core.dependencies import AppDependencies, get_app_dependencies
-from app.core.errors import (
+from app.config import (
+    AppDependencies,
     GRAPH_EXECUTION_FAILED,
     PLAN_VALIDATION_FAILED,
     StructuredAppError,
     exception_details,
+    get_app_dependencies,
 )
+from app.agents.trip_planner_agent import build_initial_state
 from app.schemas.trip import TripPlan, TripPlanRequest
 
 router = APIRouter(prefix="/api/trip", tags=["trip"])

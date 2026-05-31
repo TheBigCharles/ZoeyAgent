@@ -111,27 +111,29 @@ Recommended structure:
 
 ```text
 app/
-  main.py
+  config.py
   api/
-    routes_health.py
-    routes_trip.py
-    routes_memory.py
-  core/
-    config.py
-    dependencies.py
+    main.py
+    routes/
+      health.py
+      trip.py
+      map.py
   schemas/
     trip.py
+    domain.py
+    graph.py
     memory.py
   agents/
+    trip_planner_agent.py
     graph.py
-    nodes/
-    subgraphs/
+    context.py
+    nodes.py
   memory/
     store.py
     extraction.py
-  tools/
-    amap.py
-    weather.py
+  services/
+    amap_service.py
+    llm_service.py
 ```
 
 For the first implementation, this can be simpler, but the boundaries should stay clear:
@@ -140,8 +142,8 @@ For the first implementation, this can be simpler, but the boundaries should sta
 - `schemas`: Pydantic contracts
 - `agents`: LangGraph construction and invocation
 - `memory`: PostgresStore and extraction logic
-- `tools`: external API clients
-- `core`: config and dependency wiring
+- `services`: external API and LLM service clients
+- `config.py`: settings, dependency wiring, and structured error boundaries
 
 ## Runtime Dependencies
 
