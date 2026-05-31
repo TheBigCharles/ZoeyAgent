@@ -12,11 +12,12 @@ from app.core.config import Settings
 @dataclass(slots=True)
 class AmapMCPService:
     settings: Settings
+    started: bool = False
 
     async def start(self) -> None:
         """Start or connect to the shared Amap MCP server."""
-        raise NotImplementedError
+        self.started = True
 
     async def close(self) -> None:
         """Close the shared Amap MCP client/server resources."""
-        raise NotImplementedError
+        self.started = False
