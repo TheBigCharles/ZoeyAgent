@@ -1,8 +1,9 @@
 import asyncio
 from datetime import datetime
 
-from app.agents.context import ContextAssembler, assemble_planner_context
+from app.agents.context import ContextAssembler, ContextAssemblyResult, MainPlannerContextAssemblyNode, assemble_planner_context
 from app.agents.trip_planner_agent import build_travel_planner_graph
+import app.schemas.graph as graph_schemas
 from app.schemas.graph import ContextConfig, ContextPacket, ContextProfile, PromptTemplateSpec, TravelPlanState
 from app.schemas.trip import TripPlanRequest, TripPreferencesInput
 
@@ -144,6 +145,23 @@ def test_context_assembly_node_writes_planner_context_sections() -> None:
     assert "[Output Schema]" in result["planner_context"]
 
 
+def test_main_planner_context_assembly_node_accepts_assembler_interface() -> None:
+    class StaticAssembler:
+        def assemble(self, state, profile, prompt_template=None):
+            assert profile.profile_name == "global_planner"
+            assert prompt_template.output_schema_name == "TripPlan"
+            return ContextAssemblyResult(selected_packets=[], text="custom planner context", total_tokens=0)
+
+    async def run_node() -> TravelPlanState:
+        node = MainPlannerContextAssemblyNode(assembler=StaticAssembler())
+        return await node({"request": make_request()})
+
+    result = asyncio.run(run_node())
+
+    assert result["context_packets"] == []
+    assert result["planner_context"] == "custom planner context"
+
+
 def test_travel_planner_graph_runs_context_assembly_before_planner() -> None:
     async def run_graph() -> TravelPlanState:
         request = make_request()
@@ -154,3 +172,7 @@ def test_travel_planner_graph_runs_context_assembly_before_planner() -> None:
 
     assert "[User Request]" in result["planner_context"]
     assert result["context_packets"]
+
+
+def test_graph_schemas_do_not_expose_unused_specialist_search_config() -> None:
+    assert not hasattr(graph_schemas, "SpecialistSearchConfig")

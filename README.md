@@ -27,8 +27,8 @@ flowchart TB
         init --> loadMemory["LoadMemoryNode<br/>让计划接上历史偏好"]
         loadMemory --> normalize["NormalizeRequestNode<br/>把前端输入转为 graph 可用格式"]
         normalize --> searchFanout["Search fanout<br/>分发工具查询任务"]
-        searchFanout --> attraction["AttractionSearchSubgraph<br/>先找可用景点候选"]
-        attraction --> hotel["HotelSearchSubgraph<br/>酒店依赖景点位置"]
+        searchFanout --> attraction["AttractionSearchSubgraph<br/>LLM ReAct 搜索景点候选"]
+        attraction --> hotel["HotelSearchSubgraph<br/>LLM ReAct 搜索酒店候选"]
         searchFanout --> weather["WeatherQueryNode<br/>天气只依赖城市和日期"]
         hotel ~~~ weather
         attraction --> searchResults["Search results in state<br/>景点 天气 酒店写回状态"]
@@ -49,7 +49,7 @@ flowchart TB
 
     subgraph supportLayer["支撑依赖"]
         direction LR
-        attractionBridge["Attraction Weather Hotel search"]
+        attractionBridge["Attraction Weather Hotel search<br/>统一归一化工具入口"]
         amapClient["Amap MCP client<br/>统一地图工具入口"]
         amapServer["Amap MCP server"]
         amapApi["Amap API"]
@@ -184,12 +184,11 @@ flowchart TB
 
     subgraph configData["Configuration schemas"]
         direction LR
-        configHub["配置型 schema<br/>控制上下文预算、prompt 和搜索子图行为"]
+        configHub["配置型 schema<br/>控制上下文预算和 prompt 行为"]
         contextConfig["ContextConfig<br/>上下文预算<br/>&bull; max_tokens, reserve_ratio<br/>&bull; min_relevance<br/>&bull; scoring weights<br/>&bull; enable_compression"]
         contextProfile["ContextProfile<br/>节点上下文画像<br/>&bull; profile_name<br/>&bull; allowed_sources<br/>&bull; required_sections<br/>&bull; output_schema_name optional"]
         promptTemplate["PromptTemplateSpec<br/>提示模板规格<br/>&bull; template_name<br/>&bull; role and task<br/>&bull; input_fields<br/>&bull; allowed_tools<br/>&bull; output_schema_name"]
         llmNodeSpec["LLMNodeSpec<br/>LLM 节点规格<br/>&bull; node_name<br/>&bull; context_profile<br/>&bull; prompt_template<br/>&bull; output_schema_name"]
-        specialistConfig["SpecialistSearchConfig<br/>搜索子图规格<br/>&bull; planner executor evaluator prompts<br/>&bull; allowed_tools<br/>&bull; ranking_policy<br/>&bull; max_retries"]
     end
 
     tripPlan["TripPlan<br/>最终响应模型<br/>&bull; session_id<br/>&bull; days<br/>&bull; weather_info<br/>&bull; overall_suggestions"]
@@ -211,7 +210,6 @@ flowchart TB
     configHub --> contextProfile
     configHub --> promptTemplate
     configHub --> llmNodeSpec
-    configHub --> specialistConfig
 
     classDef api fill:#e7f5ff,stroke:#1971c2,color:#0b3558
     classDef transform fill:#fff4e6,stroke:#e67700,color:#5c3300
@@ -223,7 +221,7 @@ flowchart TB
     class session,normalize transform
     class normalized,state,runtimeHub,context,attractionResult,hotelResult,quality internal
     class memoryHub,memoryCandidate,maintenance memory
-    class configHub,contextConfig,contextProfile,promptTemplate,llmNodeSpec,specialistConfig config
+    class configHub,contextConfig,contextProfile,promptTemplate,llmNodeSpec config
 ```
 
 ## 组件职责速览
@@ -255,7 +253,8 @@ flowchart TB
 **上下文和模型调用**
 
 - `ContextAssembler`：从 state、working memory、长期记忆和工具结果中挑选最有价值的信息，组装给 LLM 的 prompt context。
-- `ContextAssemblyNode`：在主规划链路中为 `PlannerNode` 生成 planner context，不负责调用外部工具。
+- `ContextAssemblyNode`：主规划链路里的可替换 adapter，基于 `ContextAssemblyInterface` 为 `PlannerNode` 生成 planner context，不负责调用外部工具。
+- `SpecialistContextBuilder`：ReAct 子图内部的 local context adapter，只读取子图需要的主 state 摘要和 local scratchpad，不作为主图级节点出现。
 - `LLMService`：封装 OpenAI-compatible 模型调用入口，包括普通调用、tool calling 和 stream。
 - `LLMNodeSpec`：描述一个 LLM 节点用哪个 context profile、prompt template 和 output schema，避免 prompt 调用散落在代码里。
 
@@ -266,9 +265,9 @@ flowchart TB
 
 **规划节点**
 
-- `AttractionSearchSubgraph`：只负责搜索、去重、排序和评估景点候选，不生成最终行程。
+- `AttractionSearchSubgraph`：LLM ReAct 风格的景点搜索子图，只负责计划搜索动作、调用归一化 Amap 服务、评估质量和写回景点候选，不生成最终行程。
 - `WeatherQueryNode`：只负责按城市和日期查询天气，不需要 LLM。
-- `HotelSearchSubgraph`：只负责基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
+- `HotelSearchSubgraph`：后续同样按 LLM ReAct 风格实现，基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
 - `PlannerNode`：使用 planner context 生成可渲染的 `TripPlan` 草稿。
 - `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、每日三餐、价格和 map points。
 - `SaveMemoryNode`：只在 `TripPlan` 校验成功后保存长期记忆，避免把无效计划写入 memory。
@@ -279,11 +278,22 @@ flowchart TB
 
 - `TravelPlanState` 是完整运行现场，Working memory 是其中负责当前会话连续性的部分。
 - `attraction_search_result` 和 `tool_observations` 来自同一批工具调用，但前者是结构化候选数据，后者是过程摘要。
+- ReAct 子图有自己的 local scratchpad，例如局部计划、动作、观察、候选和 retry 计数；主 `TravelPlanState` 只接收压缩后的结果和摘要 observation。
+- ReAct 子图不共享主 `ContextAssemblyNode`；它们通过 local context builder 构造自己的 LLM messages，避免把完整 planner context 带进局部搜索。
 - Working memory 可以被提升为 Semantic/Episodic memory，但只有长期有价值的内容才会被保存。
 
 ## 实施原则
 
 实施过程应该是递进式的：每一步都在已有结果上继续增加能力，不能为了进入下一步而推翻、重写或回退上一阶段已经跑通的行为。需要调整设计时，应通过兼容层、适配器、迁移脚本或小范围重构向前演进。
+
+**Specialist 子图共同约束**
+
+- Specialist 子图是 bounded ReAct 风格：LLM 只负责局部 plan/action 决策，工具调用必须经过项目内部 service，规则 evaluator 负责质量判断和 retry 边界。
+- 子图拥有自己的 local scratchpad，例如 local plan、attempted keywords、local observations、partial candidates、quality 和 retry count。
+- 子图使用自己的 local context builder 组装 LLM messages；它不是主 graph 里的 `ContextAssemblyNode`，也不会读取完整 planner context。
+- 子图可以共用同一个 `LLMService` API wrapper，但每个子图和 `PlannerNode` 都使用各自独立的 `messages`，不会共享 LLM 对话历史或 session。
+- 子图不直接读取完整 planner context，不生成最终 `TripPlan`，也不直接写 long-term memory。
+- 子图写回主 state 时只返回结构化结果和简短 observation，避免把完整 ReAct scratchpad 塞进 `TravelPlanState`。
 
 ## 渐进式实施步骤
 
@@ -331,9 +341,10 @@ flowchart TB
 
 7. 实现上下文组装层
    - 实现 reusable `ContextAssembler`，支持 `ContextProfile`、`PromptTemplateSpec` 和 token budget。
-   - 实现 main graph 的 `ContextAssemblyNode`，在 `PlannerNode` 前执行 Gather、Select、Structure、Compress。
-   - specialist subgraph 内部 LLM 节点使用 `ContextAssembler`，不为每个子节点额外画一个主图级 `ContextAssemblyNode`。
-   - 验证方式：用固定 state 测试上下文来源过滤、重要性排序、压缩开关和 planner context sections。
+   - 将 main graph 的 `ContextAssemblyNode` 做成可替换 adapter，基于 `ContextAssemblyInterface` 在 `PlannerNode` 前执行 Gather、Select、Structure、Compress。
+   - 实现 `SpecialistContextBuilder`，让 ReAct 子图内部 LLM 节点通过 local state 和必要主 state 摘要组装 messages。
+   - specialist subgraph 不额外画主图级 `ContextAssemblyNode`，但拥有自己的 local context assembly。
+   - 验证方式：用固定 state 测试上下文来源过滤、重要性排序、压缩开关、planner context sections、主 context node 可替换性和 specialist local message 构造。
 
 8. 封装 Amap MCP tool 和归一化层
    - 使用 MCP Python client，通过 stdio 连接已安装的 `sugarforever/amap-mcp-server`。
@@ -354,24 +365,28 @@ flowchart TB
    - 验证方式：用真实 Amap weather 响应形状的测试 fixture 和 smoke test 确认 graph state 中写入 `weather_info`。
 
 10. 建立 specialist search 子图基础设施
-   - 实现 `SpecialistSearchConfig` 驱动的共享子图方法论。
-   - 抽出 local task planner、restricted tool executor、step evaluator、bounded retry、rank/deduplicate 和 result write-back 的基础件。
-   - 子图拥有自己的 local context，不直接读取完整 planner context，也不直接生成最终 `TripPlan`。
-   - 验证方式：用真实响应形状的测试 fixture 覆盖 retry 上限、quality warning、best-effort result。
+   - 建立 specialist 子图共同方法论：local task planner、restricted tool executor、step evaluator、bounded retry、rank/deduplicate 和 result write-back。
+   - 共同基础设施不定义独立的通用搜索配置 schema；共享的是接口、约束和 helper，具体搜索逻辑保留在各自领域子图中。
+   - 子图拥有自己的 local context 和 local scratchpad，不直接读取完整 planner context，也不直接生成最终 `TripPlan`。
+   - 子图只通过项目内部 service 调工具，例如 Amap service 或后续其他工具封装，不能直接把 raw provider response 写进 planner。
+   - 验证方式：用真实响应形状的测试 fixture 覆盖 retry 上限、quality warning、best-effort result、去重排序和 result write-back。
 
-11. 实现景点搜索子图
-   - 先实现关键词搜索、POI 归一化、去重和基础排序。
-   - 再逐步加入 detail search、around search、质量评估和 bounded retry。
-   - 子图只输出 `AttractionSearchResult`，不直接生成最终行程。
-   - 验证方式：用真实 POI/detail/geocode 响应形状确认输出包含去重后且尽量 map-ready 的 `AttractionSearchResult` 和质量信息。
+11. 实现 LLM ReAct 景点搜索子图
+   - 实现 `AttractionSearchSubgraph`：LLM 先生成局部搜索计划，再根据 observation 选择 `search_attractions` action。
+   - 子图通过 `SpecialistContextBuilder` 构造 plan/action messages，不直接手写完整 prompt context，也不复用主 graph 的 `ContextAssemblyNode`。
+   - executor 调用 `AmapMCPService.search_attractions()`，不直接调用 raw MCP；service 内部负责 `maps_text_search`、`maps_search_detail`、`maps_geo` 和 `Attraction` 归一化。
+   - 规则 evaluator 基于候选数量、坐标完整度、去重后数量和偏好匹配生成 `SearchQuality`，质量不足时 bounded retry。
+   - 子图只写回 `AttractionSearchResult`、扁平 `attractions` 和简短 `tool_observations`，不生成最终行程。
+   - 验证方式：用 fake LLM/fake Amap 覆盖 plan/action、去重、排序、retry、非法 LLM 输出和依赖缺失；用真实 Gemini + Amap smoke 确认输出尽量 map-ready 的景点候选。
 
-12. 实现酒店搜索子图
-   - 基于景点结果选择酒店搜索 anchor。
-   - 搜索并排序候选酒店，输出 `HotelSearchResult`。
-   - 使用 geocode、around search 和 direction summary 评估酒店到主要活动区域的距离、时间和交通方式。
-   - 当 `transport_preference = driving` 时，将停车便利性或附近停车证据作为高优先级 ranking signal。
-   - 明确 Amap POI 只能提供候选酒店，不能确认真实房态。
-   - 验证方式：用真实酒店 POI/detail/geocode 响应形状确认候选酒店排序、selected hotel 和 ranking reasons 可用。
+12. 实现 LLM ReAct 酒店搜索子图
+   - 实现 `HotelSearchSubgraph`：LLM 先基于景点结果、城市、预算、交通方式和住宿偏好生成局部酒店搜索计划。
+   - 子图同样通过 `SpecialistContextBuilder` 构造 plan/action messages，只读取必要的景点候选摘要和酒店 local scratchpad。
+   - LLM 每轮选择受限 action，例如搜索酒店候选、切换景点 anchor、扩大搜索范围或请求 direction summary。
+   - executor 只调用项目内部归一化工具，例如 `AmapMCPService.search_hotels()` 和必要的 route summary helper，不直接把 raw Amap 响应交给 Planner。
+   - 规则 evaluator 基于候选数量、坐标完整度、到景点 anchor 的距离/耗时、预算线索、评分和交通偏好生成 `SearchQuality`。
+   - 明确 Amap POI 只能提供候选酒店，不能确认真实房态；子图只输出 `HotelSearchResult`、扁平 `hotels`、selected hotel 和 ranking reasons。
+   - 验证方式：用 fake LLM/fake Amap 覆盖 action、anchor 切换、retry、best-effort、候选排序和工具失败；用真实酒店 POI/detail/geocode 响应形状确认候选酒店可用于后续 Planner。
 
 13. 强化 PlannerNode
    - 将景点、酒店、天气、预算、偏好和 extra requirements 汇总为 planner context。

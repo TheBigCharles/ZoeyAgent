@@ -104,13 +104,14 @@ async def create_app_dependencies() -> AppDependencies:
 
     settings = get_settings()
     amap_client = AmapMCPService(settings=settings)
+    llm_client = LLMService(settings=settings)
     return AppDependencies(
         settings=settings,
-        graph=build_travel_planner_graph(amap_client=amap_client),
+        graph=build_travel_planner_graph(amap_client=amap_client, llm_service=llm_client),
         checkpointer=InMemorySaver(),
         store=None,
         amap_client=amap_client,
-        llm_client=LLMService(settings=settings),
+        llm_client=llm_client,
     )
 
 

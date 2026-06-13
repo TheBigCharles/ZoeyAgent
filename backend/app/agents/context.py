@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from app.schemas.graph import ContextConfig, ContextPacket, ContextProfile, PromptTemplateSpec, TravelPlanState
 
@@ -14,6 +14,16 @@ class ContextAssemblyResult:
     selected_packets: list[ContextPacket]
     text: str
     total_tokens: int
+
+
+class ContextAssemblyInterface(Protocol):
+    def assemble(
+        self,
+        state: TravelPlanState,
+        profile: ContextProfile,
+        prompt_template: PromptTemplateSpec | None = None,
+    ) -> ContextAssemblyResult:
+        ...
 
 
 class ContextAssembler:
@@ -155,28 +165,81 @@ class ContextAssembler:
         return sections
 
 
+class MainPlannerContextAssemblyNode:
+    def __init__(self, assembler: ContextAssemblyInterface | None = None) -> None:
+        self.assembler = assembler or ContextAssembler()
+
+    async def __call__(self, state: TravelPlanState) -> dict[str, Any]:
+        profile = ContextProfile(
+            profile_name="global_planner",
+            max_tokens=3000,
+            allowed_sources=["request", "semantic", "episodic", "tool", "validation"],
+            required_sections=[
+                "User Request",
+                "Known User Preferences",
+                "Relevant Past Decisions",
+                "Tool Observations",
+                "Validation Errors",
+            ],
+            output_schema_name="TripPlan",
+        )
+        prompt = PromptTemplateSpec(
+            template_name="global_planner",
+            role="You are a travel planner.",
+            task="Generate a valid TripPlan.",
+            output_schema_name="TripPlan",
+        )
+        result = self.assembler.assemble(state, profile=profile, prompt_template=prompt)
+        return {
+            "context_packets": result.selected_packets,
+            "planner_context": result.text,
+        }
+
+
+class SpecialistContextBuilder:
+    def build_messages(
+        self,
+        *,
+        purpose: str,
+        state: TravelPlanState,
+        local_state: Any,
+        output_schema_name: str,
+        instruction: str,
+    ) -> list[dict[str, str]]:
+        normalized = state["normalized_request"]
+        local_context = self._dump(local_state) if local_state is not None else "None"
+        return [
+            {
+                "role": "system",
+                "content": (
+                    f"You are the local context assembly adapter for {purpose}. "
+                    "Only use the scoped specialist context. Do not generate the final TripPlan."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{instruction}\n"
+                    f"output_schema={output_schema_name}\n"
+                    f"cities={normalized.cities}\n"
+                    f"days_count={normalized.days_count}\n"
+                    f"transport_preference={normalized.transport_preference}\n"
+                    f"accommodation_preferences={normalized.accommodation_preferences}\n"
+                    f"attraction_preferences={normalized.attraction_preferences}\n"
+                    f"budget={normalized.budget}\n"
+                    f"extra_requirements={normalized.extra_requirements}\n"
+                    f"semantic_memories={state.get('semantic_memories', [])}\n"
+                    f"episodic_memories={state.get('episodic_memories', [])}\n"
+                    f"local_state={local_context}"
+                ),
+            },
+        ]
+
+    def _dump(self, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        return value
+
+
 async def assemble_planner_context(state: TravelPlanState) -> dict[str, Any]:
-    profile = ContextProfile(
-        profile_name="global_planner",
-        max_tokens=3000,
-        allowed_sources=["request", "semantic", "episodic", "tool", "validation"],
-        required_sections=[
-            "User Request",
-            "Known User Preferences",
-            "Relevant Past Decisions",
-            "Tool Observations",
-            "Validation Errors",
-        ],
-        output_schema_name="TripPlan",
-    )
-    prompt = PromptTemplateSpec(
-        template_name="global_planner",
-        role="You are a travel planner.",
-        task="Generate a valid TripPlan.",
-        output_schema_name="TripPlan",
-    )
-    result = ContextAssembler().assemble(state, profile=profile, prompt_template=prompt)
-    return {
-        "context_packets": result.selected_packets,
-        "planner_context": result.text,
-    }
+    return await MainPlannerContextAssemblyNode()(state)

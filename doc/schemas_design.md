@@ -485,28 +485,6 @@ Design notes:
 - Deterministic or rule-only nodes should not be modeled as `LLMNodeSpec`.
 - `WeatherQueryNode` is deterministic and does not use `ContextAssembler`.
 
-### SpecialistSearchConfig
-
-Used to define a shared search-subgraph methodology with domain-specific configuration.
-
-```python
-class SpecialistSearchConfig(BaseModel):
-    name: str
-    planner_prompt: str
-    executor_prompt: str
-    evaluator_prompt: str | None = None
-    allowed_tools: list[str] = Field(default_factory=list)
-    output_schema_name: str
-    ranking_policy: str
-    max_retries: int = Field(default=3, ge=0)
-    memory_candidate_policy: str | None = None
-```
-
-Design notes:
-
-- `AttractionSearchSubgraph` and `HotelSearchSubgraph` use the same methodology.
-- They should not be forced into one universal subgraph because prompts, evaluator rules, ranking policies, tools, and output schemas are domain-specific.
-
 ### NormalizedTripRequest
 
 `NormalizedTripRequest` is the cleaned version of `TripPlanRequest` used by graph nodes.

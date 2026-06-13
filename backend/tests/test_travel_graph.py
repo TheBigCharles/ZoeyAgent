@@ -1,8 +1,9 @@
 import asyncio
+import json
 from datetime import date
 
 from app.agents.trip_planner_agent import build_travel_planner_graph
-from app.schemas.domain import WeatherInfo
+from app.schemas.domain import Attraction, Location, WeatherInfo
 from app.schemas.graph import TravelPlanState
 from app.schemas.trip import TripPlan, TripPlanRequest, TripPreferencesInput
 
@@ -22,6 +23,37 @@ def make_request() -> TripPlanRequest:
         budget=3000,
         extra_requirements="Keep the pace relaxed",
     )
+
+
+def llm_response(payload: dict) -> dict:
+    return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+
+class FakeAttractionLLM:
+    async def complete(self, messages: list[dict], **_: object) -> dict:
+        text = "\n".join(message["content"] for message in messages)
+        if "选择下一次 action" in text:
+            return llm_response(
+                {
+                    "tool_name": "search_attractions",
+                    "keywords": "museum",
+                    "city": "Beijing",
+                    "rationale": "Search museums for the history preference.",
+                }
+            )
+        if "局部 plan" in text:
+            return llm_response(
+                {
+                    "steps": [
+                        {
+                            "city": "Beijing",
+                            "intent": "history culture",
+                            "suggested_keywords": ["museum"],
+                        }
+                    ]
+                }
+            )
+        raise AssertionError("unexpected prompt")
 
 
 def test_minimal_travel_planner_graph_outputs_valid_trip_plan() -> None:
@@ -100,3 +132,78 @@ def test_travel_planner_graph_keeps_planning_when_weather_fails() -> None:
     assert trip_plan.weather_info == []
     assert result["weather_info"] == []
     assert "Amap weather query for Beijing failed: RuntimeError." in result["tool_observations"]
+
+
+def test_travel_planner_graph_writes_attraction_search_result_before_planning() -> None:
+    class SearchClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def search_attractions(self, keywords: str, city: str | None = None) -> list[Attraction]:
+            self.calls.append(f"{city}:{keywords}")
+            return [
+                Attraction(
+                    name=f"Museum {index}",
+                    city=city,
+                    poi_id=f"POI-{index}",
+                    location=Location(longitude=116.3 + index * 0.001, latitude=39.9),
+                    rating=4.5,
+                )
+                for index in range(6)
+            ]
+
+        async def get_weather(self, city: str) -> list[WeatherInfo]:
+            return []
+
+    async def run_graph() -> tuple[TravelPlanState, SearchClient]:
+        client = SearchClient()
+        graph = build_travel_planner_graph(amap_client=client, llm_service=FakeAttractionLLM())
+        request = make_request()
+        result = await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+        return result, client
+
+    result, client = asyncio.run(run_graph())
+
+    trip_plan = TripPlan.model_validate(result["trip_plan"])
+    assert client.calls == ["Beijing:museum"]
+    assert len(result["attraction_search_result"].attractions) == 6
+    assert result["attractions"] == result["attraction_search_result"].attractions
+    assert any("LLM action search_attractions" in observation for observation in result["tool_observations"])
+    assert trip_plan.session_id == "session-graph-001"
+
+
+def test_travel_planner_graph_keeps_planning_when_attraction_search_fails() -> None:
+    class FailingSearchClient:
+        async def search_attractions(self, keywords: str, city: str | None = None) -> list[Attraction]:
+            raise RuntimeError("attraction search unavailable")
+
+        async def get_weather(self, city: str) -> list[WeatherInfo]:
+            return [
+                WeatherInfo(
+                    city=city,
+                    date=date(2026, 6, 10),
+                    day_weather="sunny",
+                    night_weather="cloudy",
+                    day_temp=28,
+                    night_temp=18,
+                )
+            ]
+
+    async def run_graph() -> TravelPlanState:
+        graph = build_travel_planner_graph(amap_client=FailingSearchClient(), llm_service=FakeAttractionLLM())
+        request = make_request()
+        return await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+
+    result = asyncio.run(run_graph())
+
+    trip_plan = TripPlan.model_validate(result["trip_plan"])
+    assert result["attractions"] == []
+    assert len(result["weather_info"]) == 1
+    assert trip_plan.weather_info == result["weather_info"]
+    assert any("Attraction search tool failure" in observation for observation in result["tool_observations"])

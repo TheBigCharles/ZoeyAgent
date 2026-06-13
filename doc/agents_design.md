@@ -523,7 +523,7 @@ SpecialistSearchSubgraph
 
 The main graph remains the global Plan-and-Solve controller. Specialist subgraphs are allowed to reason iteratively within their narrow domain, but they should not own final itinerary synthesis or direct long-term memory writes.
 
-Implementation should use a shared methodology with domain-specific configuration. This avoids duplicated graph/node logic without forcing attraction and hotel search into one universal subgraph.
+Implementation should use a shared methodology with domain-specific local implementations. This avoids duplicated behavior rules without forcing attraction and hotel search into one universal runner or config schema.
 
 Reusable pieces:
 
@@ -547,21 +547,7 @@ Domain-specific pieces:
 - output schema
 - memory candidate rules
 
-Configuration example:
-
-```python
-SpecialistSearchConfig(
-    name="hotel",
-    planner_prompt="HotelTaskPlannerPrompt",
-    executor_prompt="HotelStepExecutorPrompt",
-    evaluator_prompt="HotelStepEvaluatorPrompt",
-    allowed_tools=[...],
-    output_schema="HotelSearchResult",
-    ranking_policy="hotel_ranking_policy",
-)
-```
-
-The attraction subgraph should use the same structure with attraction-specific prompts, tools, evaluator rules, ranking policy, and output schema.
+The attraction and hotel subgraphs should use the same structure with domain-specific prompts, tools, evaluator rules, ranking policy, and output schema. Shared code should live in small interfaces and helpers such as context builders, retry policy, observation formatting, and result write-back, while the domain-specific ReAct loops remain inside their own subgraph modules.
 
 Recommended internal state for each specialist subgraph:
 
