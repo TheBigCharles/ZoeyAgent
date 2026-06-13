@@ -319,7 +319,7 @@ Example local plan:
 2. Search primary POIs for each city.
 3. If result quality is low, retry with alternate keywords such as museums, historic sites, parks, food streets, shopping districts, art districts, or leisure areas.
 4. Enrich important candidates with POI detail or around-search when useful.
-5. Rank by preference match, location completeness, rating, estimated visit value, and itinerary diversity.
+5. Rank by preference match, coordinate completeness, rating, estimated visit value, and itinerary diversity.
 ```
 
 Each executable step can use a controlled ReAct loop:
@@ -733,7 +733,8 @@ Responsibilities:
 - Consider weather, pace, transportation, budget, and user preferences.
 - Include hotel and meal suggestions.
 - Generate exactly three meal objects for each day: one `breakfast`, one `lunch`, and one `dinner`.
-- Place map markers in `DayPlan.map_points`, derived from that day's attractions, hotel, and meals when coordinates are available.
+- Place map markers in `DayPlan.map_points`, derived from that day's attractions, hotel, and meals after coordinate enrichment.
+- Do not create `MapPoint` entries for objects without valid coordinates; those objects can remain in `attractions`, `hotel`, or `meals`, but they are not map-renderable.
 - Leave `Attraction.image_url` unset unless a future photo enrichment service is enabled; photo links are deferred for MVP day-trip output.
 - Use route summary fields such as `route_distance_km`, `route_duration_minutes`, and `transit_method` when available from subgraph summaries.
 - Do not return full route instructions such as bus line, station count, transfer detail, or turn-by-turn directions.

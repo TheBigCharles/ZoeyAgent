@@ -96,6 +96,8 @@ Consumers:
 MVP required MCP tools:
 
 - `maps_text_search`
+- `maps_search_detail`
+- `maps_geo`
 - `maps_weather`
 - `maps_direction_walking_by_address`
 - `maps_direction_driving_by_address`
@@ -103,16 +105,13 @@ MVP required MCP tools:
 
 Future optional MCP tools:
 
-- `maps_search_detail`
 - `maps_around_search`
-- `maps_geo`
-- `maps_regeocode`
-- `maps_geo`
 - `maps_regeocode`
 
 MVP usage:
 
 - Attraction and hotel search use `maps_text_search`.
+- POI coordinate enrichment uses `maps_search_detail` first and `maps_geo` as a fallback when text-search results do not include usable coordinates.
 - Weather uses `maps_weather`.
 - Search detail, around search, geocode, and regeocode are available to specialist subgraphs for step-level search refinement, radius expansion, parking checks, approximate coordinate-distance checks, and richer POI normalization.
 - Direction tools may be used for lightweight route summary signals such as distance, estimated time, and transport mode. Full route instructions are deferred for the MVP.
@@ -156,9 +155,9 @@ The attraction subgraph is a local Plan-and-Solve workflow. Its per-step ReAct e
 
 Optional refinements:
 
-- `maps_search_detail` can enrich selected POIs.
+- `maps_search_detail` should enrich selected POIs when text search returns a POI ID but no coordinates.
 - `maps_around_search` can find nearby attractions or restaurants once a location is known.
-- `maps_geo` can convert addresses to coordinates if POI search lacks usable coordinates.
+- `maps_geo` should convert city + address/name to coordinates when POI detail is unavailable or still lacks usable coordinates.
 - Direction tools can estimate lightweight distance/time/mode between candidate attractions or from hotel anchors, but should not return step-by-step route instructions.
 
 ### Weather Query
@@ -237,6 +236,7 @@ Optional refinements:
 
 - `maps_around_search` can search near selected attraction clusters.
 - `maps_around_search` can search for nearby parking lots when the trip uses driving.
+- `maps_search_detail` and `maps_geo` should be used to make hotel candidates map-ready before route summaries are computed.
 - Direction tools can estimate public transit suitability, walkability, and driving convenience as summary signals.
 - Direction tool outputs should be reduced to distance, estimated duration, and transport mode. Do not expose detailed route steps such as bus line, station count, turn-by-turn walking, or driving instructions in the MVP response.
 
@@ -272,6 +272,8 @@ Deferred:
 
 If summary route data is unavailable, the graph should keep route slots nullable and return `route_distance_km = None` and `route_duration_minutes = None`.
 
+Route summary is not map data. It contains only distance, estimated duration, and transport mode. Frontend map rendering still depends on `MapPoint.location`, so POI coordinate enrichment must run before building `DayPlan.map_points`.
+
 ## Provider Response Normalization
 
 Tool outputs should be normalized as early as possible.
@@ -289,6 +291,13 @@ Normalize to:
 ```python
 Location(longitude=116.397128, latitude=39.916527)
 ```
+
+Real `maps_text_search` responses from `sugarforever/amap-mcp-server` may contain only `id`, `name`, `address`, and `typecode`. In that case:
+
+1. Call `maps_search_detail(id)` and use its `location`, `city`, `type`, and `biz_ext` fields when available.
+2. If detail has no usable `location`, call `maps_geo(address=<address or name>, city=<city>)`.
+3. Write the resulting `Location` back into the normalized `Attraction` or `Hotel`.
+4. Generate `MapPoint` only from normalized entities that have valid coordinates.
 
 ### Ratings
 
@@ -444,7 +453,7 @@ Examples:
 search attractions in Beijing with keyword "历史文化"
 query Beijing weather
 search economy hotels in Beijing
-normalize a sample Amap coordinate string
+normalize a real Amap coordinate string
 ```
 
 Then test through graph-level endpoint:

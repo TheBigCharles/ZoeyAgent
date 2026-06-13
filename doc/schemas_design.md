@@ -269,6 +269,7 @@ Design notes:
 
 - `order_index` supports editable itinerary cards.
 - `location` is optional at the model level because some provider results may be incomplete, but `ValidateTripPlanNode` should prefer complete map-ready attractions.
+- When an attraction is selected for a rendered itinerary day, the tool layer should attempt coordinate enrichment before the planner builds `DayPlan.map_points`.
 - `image_url` is intentionally nullable. Photo enrichment is deferred for the MVP.
 
 ### Hotel
@@ -354,6 +355,8 @@ class MapPoint(BaseModel):
     point_type: str = Field(default="attraction", description="attraction/hotel/meal")
 ```
 
+`MapPoint.location` is required because this is the frontend map-rendering contract. Do not create a `MapPoint` from an attraction, hotel, or meal until that object has valid coordinates.
+
 ### DayPlan
 
 ```python
@@ -377,6 +380,7 @@ class DayPlan(BaseModel):
 Design notes:
 
 - `map_points` lives under each day, not at the top level.
+- `map_points` should be derived from that day's selected attractions, hotel, and meals after coordinate enrichment.
 - `total_price` is the only required price summary. The frontend calculates trip-level total by summing all days.
 - `route_distance_km`, `route_duration_minutes`, and `transit_method` are lightweight route summary slots.
 - They may be filled from Amap direction tools for ranking/planning support.

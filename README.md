@@ -304,22 +304,22 @@ flowchart TB
    - 实现 async `POST /api/trip/plan`。
    - 首次请求可以不传 `session_id`；后端生成新的 `session_id`，并在 `TripPlan.session_id` 中返回。
    - 如果前端已经拿到 `session_id`，后续同一 planning session 必须继续传回该值。
-   - 先返回一个固定或 mock 的合法 `TripPlan`，用于验证 API 合同和前端渲染合同。
+   - 先返回一个受控的合法 `TripPlan` 测试数据，用于验证 API 合同和前端渲染合同。
    - 验证方式：用 `curl` 提交不带 `session_id` 的最小合法请求，确认返回值能通过 `TripPlan` 校验且包含后端生成的 `session_id`。
 
 4. 建立 LangGraph 主流程
    - 创建 `TravelPlanState` 和最小 `TravelPlannerGraph`。
    - 先接入 `InitializeWorkingState`、`NormalizeRequestNode`、`PlannerNode`、`ValidateTripPlanNode`。
-   - 工具结果继续使用 mock 数据，确保图编排和验证循环先稳定。
+   - 工具结果继续使用受控测试数据，确保图编排和验证循环先稳定。
    - 保持 graph 调用入口为 async，后续可以直接替换成 `graph.ainvoke(...)`。
-   - 验证方式：通过 `/api/trip/plan` 调用 mock graph，确认 endpoint 不再直接拼响应，而是从 graph 输出 `TripPlan`。
+   - 验证方式：通过 `/api/trip/plan` 调用测试 graph，确认 endpoint 不再直接拼响应，而是从 graph 输出 `TripPlan`。
 
 5. 建立应用生命周期、依赖注入和错误边界
    - 在 `config.py` 中集中管理 settings、graph、checkpointer、store、Amap MCP client 和 LLM client。
    - 在 FastAPI startup/shutdown 中预留初始化和关闭外部资源的生命周期。
    - 引入结构化错误边界，例如 `GRAPH_EXECUTION_FAILED`、`TOOL_CALL_FAILED`、`PLAN_VALIDATION_FAILED`。
    - MVP 可以先保留 FastAPI 默认校验错误，但 graph/tool/planner 异常需要开始收口到统一错误形状。
-   - 验证方式：用 fake dependency 覆盖 graph 成功、graph 抛错、配置缺失三类路径。
+   - 验证方式：用 dependency override 覆盖 graph 成功、graph 抛错、配置缺失三类路径。
 
 6. 封装 LLM service 和 LLM 节点基础设施
    - 在 `services/llm_service.py` 中封装 OpenAI-compatible chat completion。
@@ -327,7 +327,7 @@ flowchart TB
    - 保留 stream response 方法签名，但真实 streaming 推迟到 SSE/WebSocket 或进度 UI 阶段。
    - 图节点只依赖项目内部 `LLMService`，不直接散落调用 OpenAI SDK。
    - 建立 `PromptTemplateRegistry`、`BaseLLMNode`、structured output validation 和 retry policy skeleton。
-   - 验证方式：用 mock transport 或 fake client 测试 message、tools 和 deferred stream 行为。
+   - 验证方式：用注入式测试 client 覆盖 message、tools 和 deferred stream 行为，并用真实 `.env` 做 LLM smoke test。
 
 7. 实现上下文组装层
    - 实现 reusable `ContextAssembler`，支持 `ContextProfile`、`PromptTemplateSpec` 和 token budget。
@@ -339,30 +339,31 @@ flowchart TB
    - 使用 MCP Python client，通过 stdio 连接已安装的 `sugarforever/amap-mcp-server`。
    - 默认启动配置为 `AMAP_MCP_COMMAND=amap-mcp-server`、`AMAP_MCP_ARGS=`，密钥环境变量为 `AMAP_MAPS_API_KEY`。
    - 在 `services/amap_service.py` 中建立共享 Amap MCP client 封装，整个后端通过同一个服务边界调用地图工具。
-   - 先接入真实 MCP 工具名：`maps_text_search`、`maps_weather`、`maps_direction_walking_by_address`、`maps_direction_driving_by_address`、`maps_direction_transit_integrated_by_address`。
+   - 接入真实 MCP 工具名：`maps_text_search`、`maps_search_detail`、`maps_geo`、`maps_weather`、`maps_direction_walking_by_address`、`maps_direction_driving_by_address`、`maps_direction_transit_integrated_by_address`。
    - 实现坐标、评分、价格、天气温度和 route summary 的 provider response normalization。
+   - 当 `maps_text_search` 返回 POI 但缺少经纬度时，先用 `maps_search_detail` 按 POI ID 补全坐标，再用 `maps_geo` 按城市和地址/名称兜底。
+   - 增加地图 anchor helper：只从有 `location` 的景点、酒店和餐食生成 `MapPoint`，保证 `DayPlan.map_points` 可被前端直接渲染。
    - direction tool 输出只保留距离、耗时和交通方式，不返回公交站数、换乘细节或 turn-by-turn 路线。
    - 保证 raw Amap 响应不会直接进入 `PlannerNode`。
-   - 先用 fake MCP client 和 sample response 验证，不要求一开始连真实 Amap。
-   - 验证方式：用 fake MCP response 测试 POI、weather 和 route summary normalize 结果，不要求一开始连真实 Amap。
+   - 验证方式：用真实 Amap MCP smoke test 覆盖 POI 搜索、POI detail/geocode 坐标补全、天气和 route summary；单元测试使用从真实响应形状抽出的测试 fixture 防止回归。
 
 9. 接入天气节点
    - 实现 `WeatherQueryNode` 调用 Amap weather 工具。
    - 将结果归一化为 `list[WeatherInfo]`。
    - 天气失败时返回空列表和结构化 observation，不阻断整条规划链路。
-   - 验证方式：mock Amap weather response，确认 graph state 中写入 `weather_info`。
+   - 验证方式：用真实 Amap weather 响应形状的测试 fixture 和 smoke test 确认 graph state 中写入 `weather_info`。
 
 10. 建立 specialist search 子图基础设施
    - 实现 `SpecialistSearchConfig` 驱动的共享子图方法论。
    - 抽出 local task planner、restricted tool executor、step evaluator、bounded retry、rank/deduplicate 和 result write-back 的基础件。
    - 子图拥有自己的 local context，不直接读取完整 planner context，也不直接生成最终 `TripPlan`。
-   - 验证方式：用 fake tool 和 fake evaluator 测试 retry 上限、quality warning、best-effort result。
+   - 验证方式：用真实响应形状的测试 fixture 覆盖 retry 上限、quality warning、best-effort result。
 
 11. 实现景点搜索子图
    - 先实现关键词搜索、POI 归一化、去重和基础排序。
    - 再逐步加入 detail search、around search、质量评估和 bounded retry。
    - 子图只输出 `AttractionSearchResult`，不直接生成最终行程。
-   - 验证方式：mock POI response，确认输出包含去重后的 `AttractionSearchResult` 和质量信息。
+   - 验证方式：用真实 POI/detail/geocode 响应形状确认输出包含去重后且尽量 map-ready 的 `AttractionSearchResult` 和质量信息。
 
 12. 实现酒店搜索子图
    - 基于景点结果选择酒店搜索 anchor。
@@ -370,7 +371,7 @@ flowchart TB
    - 使用 geocode、around search 和 direction summary 评估酒店到主要活动区域的距离、时间和交通方式。
    - 当 `transport_preference = driving` 时，将停车便利性或附近停车证据作为高优先级 ranking signal。
    - 明确 Amap POI 只能提供候选酒店，不能确认真实房态。
-   - 验证方式：mock hotel POI response，确认候选酒店排序、selected hotel 和 ranking reasons 可用。
+   - 验证方式：用真实酒店 POI/detail/geocode 响应形状确认候选酒店排序、selected hotel 和 ranking reasons 可用。
 
 13. 强化 PlannerNode
    - 将景点、酒店、天气、预算、偏好和 extra requirements 汇总为 planner context。
@@ -401,14 +402,14 @@ flowchart TB
    - 配置 Postgres、pgvector、LangGraph `PostgresStore` 和本地 vLLM embedding endpoint。
    - 实现 `LoadMemoryNode` 搜索 semantic 和 episodic memories。
    - 实现 `SaveMemoryNode`，只在 `TripPlan` 验证成功后通过 `MemoryExtractionService` 写入长期记忆。
-   - 本地未配置 Postgres 时应允许关闭或 mock 长期记忆，避免开发流程被基础设施阻塞。
-   - 验证方式：分别测试 memory disabled、mock store、真实 PostgresStore 三种路径。
+   - 本地未配置 Postgres 时应允许关闭长期记忆，避免开发流程被基础设施阻塞。
+   - 验证方式：分别测试 memory disabled、测试 store、真实 PostgresStore 三种路径。
 
 18. 增加 memory 调试接口
    - 实现 `GET /api/memory/semantic` 和 `GET /api/memory/episodic`。
    - 用于本地开发、终端测试和记忆召回验证。
    - 生产环境上线前应加鉴权或禁用。
-   - 验证方式：在 mock store 和真实 store 下分别查询 semantic/episodic memory。
+   - 验证方式：在测试 store 和真实 store 下分别查询 semantic/episodic memory。
 
 19. 预留编辑和重算能力
    - 保留 `POST /api/trip/recalculate` 路由和 `TripRecalculateRequest`。

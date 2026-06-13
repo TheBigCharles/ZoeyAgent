@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     )
 
     embedding_base_url: str = Field(default="http://localhost:8000/v1", alias="EMBEDDING_BASE_URL")
-    embedding_api_key: str = Field(default="dummy", alias="EMBEDDING_API_KEY")
+    embedding_api_key: str = Field(default="local-dev-key", alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
     embedding_dims: int = Field(default=1024, alias="EMBEDDING_DIMS")
 
@@ -103,12 +103,13 @@ async def create_app_dependencies() -> AppDependencies:
     from app.services.llm_service import LLMService
 
     settings = get_settings()
+    amap_client = AmapMCPService(settings=settings)
     return AppDependencies(
         settings=settings,
-        graph=build_travel_planner_graph(),
+        graph=build_travel_planner_graph(amap_client=amap_client),
         checkpointer=InMemorySaver(),
         store=None,
-        amap_client=AmapMCPService(settings=settings),
+        amap_client=amap_client,
         llm_client=LLMService(settings=settings),
     )
 
