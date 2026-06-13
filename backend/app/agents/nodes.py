@@ -1,4 +1,4 @@
-"""Minimal TravelPlannerGraph nodes for the mock planning path."""
+"""Minimal TravelPlannerGraph nodes for the controlled planning path."""
 
 from __future__ import annotations
 
@@ -63,6 +63,36 @@ async def normalize_request(state: TravelPlanState) -> dict[str, NormalizedTripR
             session_id=request.session_id or "",
         )
     }
+
+
+def make_weather_query_node(amap_client: Any | None = None):
+    async def weather_query_node(state: TravelPlanState) -> dict[str, Any]:
+        weather_info = list(state.get("weather_info", []))
+        observations = list(state.get("tool_observations", []))
+
+        if amap_client is None:
+            return {
+                "weather_info": weather_info,
+                "tool_observations": observations,
+            }
+
+        normalized = state["normalized_request"]
+        for city in dict.fromkeys(normalized.cities):
+            try:
+                city_weather = await amap_client.get_weather(city)
+            except Exception as exc:
+                observations.append(f"Amap weather query for {city} failed: {type(exc).__name__}.")
+                continue
+
+            weather_info.extend(city_weather)
+            observations.append(f"Amap weather query for {city} returned {len(city_weather)} records.")
+
+        return {
+            "weather_info": weather_info,
+            "tool_observations": observations,
+        }
+
+    return weather_query_node
 
 
 async def planner_node(state: TravelPlanState) -> dict[str, TripPlan]:

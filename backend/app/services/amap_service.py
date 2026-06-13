@@ -12,11 +12,13 @@ from datetime import date as Date
 from typing import Any, Literal
 
 from app.config import Settings, StructuredAppError, TOOL_CALL_FAILED, exception_details
-from app.schemas.domain import Attraction, Hotel, Location, WeatherInfo
+from app.schemas.domain import Attraction, Hotel, Location, MapPoint, Meal, WeatherInfo
 
 
 AMAP_SOURCE = "amap"
 TEXT_SEARCH_TOOL = "maps_text_search"
+DETAIL_TOOL = "maps_search_detail"
+GEO_TOOL = "maps_geo"
 WEATHER_TOOL = "maps_weather"
 ROUTE_TOOLS = {
     "walking": "maps_direction_walking_by_address",
@@ -34,7 +36,9 @@ class AmapMCPService:
     _exit_stack: AsyncExitStack | None = None
 
     async def start(self) -> None:
-        """Mark the service ready; the stdio MCP session is opened lazily on first call."""
+        """Start the shared stdio MCP session when credentials are configured."""
+        if self.client is None and self.settings.amap_api_key:
+            await self._mcp_client()
         self.started = True
 
     async def close(self) -> None:
@@ -50,14 +54,16 @@ class AmapMCPService:
             TEXT_SEARCH_TOOL,
             _without_none({"keywords": keywords, "city": city, "citylimit": "true"}),
         )
-        return [self._poi_to_attraction(poi) for poi in _extract_pois(payload)]
+        pois = [await self._enrich_poi_coordinates(poi, city=city) for poi in _extract_pois(payload)]
+        return [self._poi_to_attraction(poi) for poi in pois]
 
     async def search_hotels(self, keywords: str, city: str | None = None) -> list[Hotel]:
         payload = await self._call_tool(
             TEXT_SEARCH_TOOL,
             _without_none({"keywords": keywords, "city": city, "citylimit": "true"}),
         )
-        return [self._poi_to_hotel(poi) for poi in _extract_pois(payload)]
+        pois = [await self._enrich_poi_coordinates(poi, city=city) for poi in _extract_pois(payload)]
+        return [self._poi_to_hotel(poi) for poi in pois]
 
     async def get_weather(self, city: str) -> list[WeatherInfo]:
         payload = await self._call_tool(WEATHER_TOOL, {"city": city})
@@ -142,6 +148,30 @@ class AmapMCPService:
         self.started = True
         return session
 
+    async def _enrich_poi_coordinates(self, poi: dict[str, Any], city: str | None = None) -> dict[str, Any]:
+        enriched = dict(poi)
+        if _parse_location(enriched.get("location")) is not None:
+            return enriched
+
+        poi_id = _optional_str(enriched.get("id"))
+        if poi_id:
+            detail = await self._call_tool(DETAIL_TOOL, {"id": poi_id})
+            if "error" not in detail:
+                enriched = {**enriched, **_without_none(detail)}
+                if _parse_location(enriched.get("location")) is not None:
+                    return enriched
+
+        address = _optional_str(enriched.get("address")) or _optional_str(enriched.get("name"))
+        geocode_city = city or _optional_str(enriched.get("city")) or _optional_str(enriched.get("cityname"))
+        if address:
+            geo = await self._call_tool(GEO_TOOL, _without_none({"address": address, "city": geocode_city}))
+            geo_locations = geo.get("return") if isinstance(geo.get("return"), list) else []
+            if geo_locations:
+                first = geo_locations[0]
+                enriched["location"] = first.get("location")
+                enriched["city"] = enriched.get("city") or first.get("city") or geocode_city
+        return enriched
+
     def _poi_to_attraction(self, poi: dict[str, Any]) -> Attraction:
         biz_ext = poi.get("biz_ext") if isinstance(poi.get("biz_ext"), dict) else {}
         return Attraction(
@@ -186,6 +216,55 @@ class AmapMCPService:
 
 def _without_none(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def build_map_points(
+    day_index: int,
+    attractions: list[Attraction] | None = None,
+    hotel: Hotel | None = None,
+    meals: list[Meal] | None = None,
+) -> list[MapPoint]:
+    points: list[MapPoint] = []
+
+    for attraction in attractions or []:
+        if attraction.location is not None:
+            points.append(
+                MapPoint(
+                    name=attraction.name,
+                    city=attraction.city,
+                    location=attraction.location,
+                    day_index=day_index,
+                    order_index=len(points),
+                    point_type="attraction",
+                )
+            )
+
+    if hotel is not None and hotel.location is not None:
+        points.append(
+            MapPoint(
+                name=hotel.name,
+                city=hotel.city,
+                location=hotel.location,
+                day_index=day_index,
+                order_index=len(points),
+                point_type="hotel",
+            )
+        )
+
+    for meal in meals or []:
+        if meal.location is not None:
+            points.append(
+                MapPoint(
+                    name=meal.name,
+                    city=meal.city,
+                    location=meal.location,
+                    day_index=day_index,
+                    order_index=len(points),
+                    point_type="meal",
+                )
+            )
+
+    return points
 
 
 def _optional_str(value: Any) -> str | None:

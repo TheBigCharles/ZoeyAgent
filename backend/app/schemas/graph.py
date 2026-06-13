@@ -64,18 +64,6 @@ class LLMNodeSpec(BaseModel):
     uses_context_assembler: bool = True
 
 
-class SpecialistSearchConfig(BaseModel):
-    name: str
-    planner_prompt: str
-    executor_prompt: str
-    evaluator_prompt: str | None = None
-    allowed_tools: list[str] = Field(default_factory=list)
-    output_schema_name: str
-    ranking_policy: str
-    max_retries: int = Field(default=3, ge=0)
-    memory_candidate_policy: str | None = None
-
-
 class NormalizedTripRequest(BaseModel):
     user_id: str
     cities: list[str]

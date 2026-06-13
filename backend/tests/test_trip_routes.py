@@ -2,6 +2,7 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
+from app.agents.trip_planner_agent import build_travel_planner_graph
 from app.api.main import create_app
 from app.config import AppDependencies
 from app.schemas.domain import DayPlan, Meal
@@ -24,8 +25,12 @@ def minimal_trip_request() -> dict:
     }
 
 
+async def controlled_graph_dependencies() -> AppDependencies:
+    return AppDependencies(graph=build_travel_planner_graph())
+
+
 def test_plan_endpoint_generates_session_id_for_first_request() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(dependency_factory=controlled_graph_dependencies)) as client:
         response = client.post("/api/trip/plan", json=minimal_trip_request())
 
     assert response.status_code == 200
@@ -40,7 +45,7 @@ def test_plan_endpoint_reuses_existing_session_id() -> None:
     payload = minimal_trip_request()
     payload["session_id"] = "existing-session-001"
 
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(dependency_factory=controlled_graph_dependencies)) as client:
         response = client.post("/api/trip/plan", json=payload)
 
     assert response.status_code == 200

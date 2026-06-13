@@ -2,7 +2,9 @@ import asyncio
 from datetime import date
 
 from app.config import Settings
+from app.schemas.domain import Attraction, Hotel, Location, Meal
 from app.services.amap_service import AmapMCPService
+from app.services.amap_service import build_map_points
 
 
 class FakeMCPClient:
@@ -203,3 +205,119 @@ def test_get_route_summary_uses_address_direction_tool_and_drops_detailed_steps(
         "route_duration_minutes": 30,
         "transit_method": "driving",
     }
+
+
+def test_search_attractions_enriches_missing_location_from_poi_detail() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_text_search": {
+                "pois": [
+                    {
+                        "id": "POI001",
+                        "name": "Palace Museum",
+                        "address": "Jingshan Front Street 4",
+                        "typecode": "110201",
+                    }
+                ]
+            },
+            "maps_search_detail": {
+                "id": "POI001",
+                "name": "Palace Museum",
+                "city": "Beijing",
+                "address": "Jingshan Front Street 4",
+                "location": "116.397128,39.916527",
+                "type": "Scenic spot",
+                "rating": "4.8",
+            },
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    attractions = asyncio.run(service.search_attractions(keywords="Palace", city="Beijing"))
+
+    assert fake_client.calls == [
+        ("maps_text_search", {"keywords": "Palace", "city": "Beijing", "citylimit": "true"}),
+        ("maps_search_detail", {"id": "POI001"}),
+    ]
+    assert attractions[0].city == "Beijing"
+    assert attractions[0].location is not None
+    assert attractions[0].location.longitude == 116.397128
+    assert attractions[0].location.latitude == 39.916527
+    assert attractions[0].rating == 4.8
+
+
+def test_search_hotels_falls_back_to_maps_geo_when_detail_has_no_location() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_text_search": {
+                "pois": [
+                    {
+                        "id": "HOTEL001",
+                        "name": "Central Hotel",
+                        "address": "Central Street 1",
+                        "typecode": "100100",
+                    }
+                ]
+            },
+            "maps_search_detail": {
+                "id": "HOTEL001",
+                "name": "Central Hotel",
+                "city": "Beijing",
+                "address": "Central Street 1",
+                "type": "Hotel",
+                "cost": "520",
+            },
+            "maps_geo": {
+                "return": [
+                    {
+                        "city": "Beijing",
+                        "location": "116.400000,39.900000",
+                        "level": "门牌号",
+                    }
+                ]
+            },
+        }
+    )
+    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+
+    hotels = asyncio.run(service.search_hotels(keywords="Hotel", city="Beijing"))
+
+    assert fake_client.calls == [
+        ("maps_text_search", {"keywords": "Hotel", "city": "Beijing", "citylimit": "true"}),
+        ("maps_search_detail", {"id": "HOTEL001"}),
+        ("maps_geo", {"address": "Central Street 1", "city": "Beijing"}),
+    ]
+    assert hotels[0].location is not None
+    assert hotels[0].location.longitude == 116.4
+    assert hotels[0].location.latitude == 39.9
+    assert hotels[0].estimated_cost == 520
+
+
+def test_build_map_points_only_uses_entities_with_locations() -> None:
+    points = build_map_points(
+        day_index=0,
+        attractions=[
+            Attraction(
+                name="Palace Museum",
+                location=Location(longitude=116.397128, latitude=39.916527),
+            ),
+            Attraction(name="No Coordinate Attraction"),
+        ],
+        hotel=Hotel(
+            name="Central Hotel",
+            location=Location(longitude=116.4, latitude=39.9),
+        ),
+        meals=[
+            Meal(
+                type="lunch",
+                name="Lunch Place",
+                location=Location(longitude=116.41, latitude=39.91),
+            ),
+            Meal(type="dinner", name="No Coordinate Dinner"),
+        ],
+    )
+
+    assert [point.name for point in points] == ["Palace Museum", "Central Hotel", "Lunch Place"]
+    assert [point.point_type for point in points] == ["attraction", "hotel", "meal"]
+    assert [point.order_index for point in points] == [0, 1, 2]
+    assert all(point.day_index == 0 for point in points)

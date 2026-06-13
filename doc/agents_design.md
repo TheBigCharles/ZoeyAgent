@@ -319,7 +319,7 @@ Example local plan:
 2. Search primary POIs for each city.
 3. If result quality is low, retry with alternate keywords such as museums, historic sites, parks, food streets, shopping districts, art districts, or leisure areas.
 4. Enrich important candidates with POI detail or around-search when useful.
-5. Rank by preference match, location completeness, rating, estimated visit value, and itinerary diversity.
+5. Rank by preference match, coordinate completeness, rating, estimated visit value, and itinerary diversity.
 ```
 
 Each executable step can use a controlled ReAct loop:
@@ -523,7 +523,7 @@ SpecialistSearchSubgraph
 
 The main graph remains the global Plan-and-Solve controller. Specialist subgraphs are allowed to reason iteratively within their narrow domain, but they should not own final itinerary synthesis or direct long-term memory writes.
 
-Implementation should use a shared methodology with domain-specific configuration. This avoids duplicated graph/node logic without forcing attraction and hotel search into one universal subgraph.
+Implementation should use a shared methodology with domain-specific local implementations. This avoids duplicated behavior rules without forcing attraction and hotel search into one universal runner or config schema.
 
 Reusable pieces:
 
@@ -547,21 +547,7 @@ Domain-specific pieces:
 - output schema
 - memory candidate rules
 
-Configuration example:
-
-```python
-SpecialistSearchConfig(
-    name="hotel",
-    planner_prompt="HotelTaskPlannerPrompt",
-    executor_prompt="HotelStepExecutorPrompt",
-    evaluator_prompt="HotelStepEvaluatorPrompt",
-    allowed_tools=[...],
-    output_schema="HotelSearchResult",
-    ranking_policy="hotel_ranking_policy",
-)
-```
-
-The attraction subgraph should use the same structure with attraction-specific prompts, tools, evaluator rules, ranking policy, and output schema.
+The attraction and hotel subgraphs should use the same structure with domain-specific prompts, tools, evaluator rules, ranking policy, and output schema. Shared code should live in small interfaces and helpers such as context builders, retry policy, observation formatting, and result write-back, while the domain-specific ReAct loops remain inside their own subgraph modules.
 
 Recommended internal state for each specialist subgraph:
 
@@ -733,7 +719,8 @@ Responsibilities:
 - Consider weather, pace, transportation, budget, and user preferences.
 - Include hotel and meal suggestions.
 - Generate exactly three meal objects for each day: one `breakfast`, one `lunch`, and one `dinner`.
-- Place map markers in `DayPlan.map_points`, derived from that day's attractions, hotel, and meals when coordinates are available.
+- Place map markers in `DayPlan.map_points`, derived from that day's attractions, hotel, and meals after coordinate enrichment.
+- Do not create `MapPoint` entries for objects without valid coordinates; those objects can remain in `attractions`, `hotel`, or `meals`, but they are not map-renderable.
 - Leave `Attraction.image_url` unset unless a future photo enrichment service is enabled; photo links are deferred for MVP day-trip output.
 - Use route summary fields such as `route_distance_km`, `route_duration_minutes`, and `transit_method` when available from subgraph summaries.
 - Do not return full route instructions such as bus line, station count, transfer detail, or turn-by-turn directions.

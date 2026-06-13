@@ -172,7 +172,7 @@ LLM_API_KEY=...
 LLM_MODEL_ID=gemini-3.1-flash-lite
 
 EMBEDDING_BASE_URL=http://localhost:8000/v1
-EMBEDDING_API_KEY=dummy
+EMBEDDING_API_KEY=local-dev-key
 EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_DIMS=1024
 
@@ -517,6 +517,7 @@ Expected:
 - Each `days[*].meals` contains exactly one `breakfast`, one `lunch`, and one `dinner`.
 - Each `days[*].total_price` is present and non-negative.
 - Each `days[*].map_points` is populated when that day's locations are available.
+- Map points are built only from entities with valid coordinates; Amap POI candidates without coordinates should be enriched through POI detail or geocoding before they become map anchors.
 - `Attraction.image_url` may be `null`; photo enrichment is deferred.
 - `route_distance_km`, `route_duration_minutes`, and `transit_method` may be populated as lightweight route summaries.
 - Full route instructions are not returned in MVP.
