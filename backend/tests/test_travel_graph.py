@@ -3,7 +3,7 @@ import json
 from datetime import date
 
 from app.agents.trip_planner_agent import build_travel_planner_graph
-from app.schemas.domain import Attraction, Location, WeatherInfo
+from app.schemas.domain import Attraction, Hotel, Location, WeatherInfo
 from app.schemas.graph import TravelPlanState
 from app.schemas.trip import TripPlan, TripPlanRequest, TripPreferencesInput
 
@@ -32,7 +32,30 @@ def llm_response(payload: dict) -> dict:
 class FakeAttractionLLM:
     async def complete(self, messages: list[dict], **_: object) -> dict:
         text = "\n".join(message["content"] for message in messages)
-        if "选择下一次 action" in text:
+        if "酒店搜索 ReAct executor" in text:
+            return llm_response(
+                {
+                    "tool_name": "search_hotels",
+                    "keywords": "budget hotel",
+                    "city": "Beijing",
+                    "anchor": "Museum 0",
+                    "rationale": "Search hotels near the first attraction.",
+                }
+            )
+        if "酒店搜索 plan" in text or "局部酒店搜索 plan" in text:
+            return llm_response(
+                {
+                    "steps": [
+                        {
+                            "city": "Beijing",
+                            "anchor": "Museum 0",
+                            "intent": "budget hotel near attractions",
+                            "suggested_keywords": ["budget hotel"],
+                        }
+                    ]
+                }
+            )
+        if "景点搜索 ReAct executor" in text or "选择下一次 action" in text:
             return llm_response(
                 {
                     "tool_name": "search_attractions",
@@ -41,7 +64,7 @@ class FakeAttractionLLM:
                     "rationale": "Search museums for the history preference.",
                 }
             )
-        if "局部 plan" in text:
+        if "景点搜索" in text and "局部 plan" in text:
             return llm_response(
                 {
                     "steps": [
@@ -172,6 +195,63 @@ def test_travel_planner_graph_writes_attraction_search_result_before_planning() 
     assert len(result["attraction_search_result"].attractions) == 6
     assert result["attractions"] == result["attraction_search_result"].attractions
     assert any("LLM action search_attractions" in observation for observation in result["tool_observations"])
+    assert trip_plan.session_id == "session-graph-001"
+
+
+def test_travel_planner_graph_writes_hotel_search_result_before_planning() -> None:
+    class SearchClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def search_attractions(self, keywords: str, city: str | None = None) -> list[Attraction]:
+            self.calls.append(f"attraction:{city}:{keywords}")
+            return [
+                Attraction(
+                    name=f"Museum {index}",
+                    city=city,
+                    address=f"Museum Road {index}",
+                    poi_id=f"POI-{index}",
+                    location=Location(longitude=116.3 + index * 0.001, latitude=39.9),
+                    rating=4.5,
+                )
+                for index in range(6)
+            ]
+
+        async def search_hotels(self, keywords: str, city: str | None = None) -> list[Hotel]:
+            self.calls.append(f"hotel:{city}:{keywords}")
+            return [
+                Hotel(
+                    name=f"Hotel {index}",
+                    city=city,
+                    poi_id=f"HOTEL-{index}",
+                    location=Location(longitude=116.4 + index * 0.001, latitude=39.91),
+                    rating=4.4,
+                    estimated_cost=450,
+                )
+                for index in range(4)
+            ]
+
+        async def get_weather(self, city: str) -> list[WeatherInfo]:
+            return []
+
+    async def run_graph() -> tuple[TravelPlanState, SearchClient]:
+        client = SearchClient()
+        graph = build_travel_planner_graph(amap_client=client, llm_service=FakeAttractionLLM())
+        request = make_request()
+        result = await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+        return result, client
+
+    result, client = asyncio.run(run_graph())
+
+    trip_plan = TripPlan.model_validate(result["trip_plan"])
+    assert client.calls == ["attraction:Beijing:museum", "hotel:Beijing:budget hotel"]
+    assert result["hotel_search_result"].selected_hotel is not None
+    assert len(result["hotel_search_result"].candidate_hotels) == 4
+    assert result["hotels"] == result["hotel_search_result"].candidate_hotels
+    assert any("LLM action search_hotels" in observation for observation in result["tool_observations"])
     assert trip_plan.session_id == "session-graph-001"
 
 

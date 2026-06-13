@@ -267,7 +267,7 @@ flowchart TB
 
 - `AttractionSearchSubgraph`：LLM ReAct 风格的景点搜索子图，只负责计划搜索动作、调用归一化 Amap 服务、评估质量和写回景点候选，不生成最终行程。
 - `WeatherQueryNode`：只负责按城市和日期查询天气，不需要 LLM。
-- `HotelSearchSubgraph`：后续同样按 LLM ReAct 风格实现，基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
+- `HotelSearchSubgraph`：LLM ReAct 风格的酒店搜索子图，基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
 - `PlannerNode`：使用 planner context 生成可渲染的 `TripPlan` 草稿。
 - `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、每日三餐、价格和 map points。
 - `SaveMemoryNode`：只在 `TripPlan` 校验成功后保存长期记忆，避免把无效计划写入 memory。
