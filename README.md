@@ -11,6 +11,16 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 - [Tools Design](doc/tools_design.md)
 - [Example Workflow](doc/example_workflow.md)
 
+## 本地启动
+
+当前开发环境以 conda env `zoey_agent` 为准；VS Code PowerShell 里 `conda activate zoey_agent` 可能不会把 `python.exe` 切到 env 内，所以推荐显式使用 env 里的 Python 启动：先确认 `backend/.env` 中有 `HOST=127.0.0.1`、`PORT=8000`、`LLM_*`、`AMAP_MAPS_API_KEY` 和 `AMAP_MCP_COMMAND`，然后在任意工作目录运行 `C:\Users\awateryMan\anaconda3\envs\zoey_agent\python.exe C:\dev\X\ZoeyAgent\backend\run_server.py`；`run_server.py` 会自动切到 `backend`、读取 `backend/.env`，并启动 `app.api.main:app`。Amap MCP 由 FastAPI 后端通过 stdio 启动，不需要单独开一个 HTTP MCP server；若 `AMAP_MCP_COMMAND=amap-mcp-server` 在当前 shell 找不到命令，可以改为 conda env 内可执行文件的相对路径：
+
+```text
+AMAP_MCP_COMMAND=../../../../Users/awateryMan/anaconda3/envs/zoey_agent/Scripts/amap-mcp-server.exe
+```
+
+HTTP 输入里 `TripPlanRequest.cities` 应传中文城市名，例如 `["北京"]`。当前 Amap MCP 的 POI 搜索对英文城市名不稳定，`["Beijing"]` 可能召回北京以外的 POI；前端展示语言可以自行决定，但传给后端的城市字段应使用高德可稳定识别的中文城市名。
+
 ## 总体架构
 
 ```mermaid
@@ -231,6 +241,7 @@ flowchart TB
 - FastAPI 应用：承接 HTTP 请求，负责路由注册、应用生命周期和依赖注入边界。
 - API routes：只处理 HTTP 入参、`session_id` 解析、调用 graph 和返回响应，不直接承担规划逻辑。
 - `TripPlanRequest`：表示前端提交的原始规划表单，例如城市、日期、偏好索引、预算和可选 `session_id`。
+- `TripPlanRequest.cities`：前端应传中文城市名，例如 `["北京"]`，因为 Amap POI 搜索对英文城市名召回不稳定，可能返回其他城市的景点。
 - `SessionResolver`：把可选 `session_id` 变成 graph 必需的非空 `thread_id`；例如首次请求生成 UUID，后续请求复用前端传回的值。
 
 **Graph 运行现场**
@@ -349,6 +360,7 @@ flowchart TB
 8. 封装 Amap MCP tool 和归一化层
    - 使用 MCP Python client，通过 stdio 连接已安装的 `sugarforever/amap-mcp-server`。
    - 默认启动配置为 `AMAP_MCP_COMMAND=amap-mcp-server`、`AMAP_MCP_ARGS=`，密钥环境变量为 `AMAP_MAPS_API_KEY`。
+   - `TripPlanRequest.cities` 面向 Amap 查询时必须使用中文城市名，例如 `北京`；英文城市名可以保留给前端展示层，但不应作为 provider-facing 城市输入。
    - 在 `services/amap_service.py` 中建立共享 Amap MCP client 封装，整个后端通过同一个服务边界调用地图工具。
    - 接入真实 MCP 工具名：`maps_text_search`、`maps_search_detail`、`maps_geo`、`maps_weather`、`maps_direction_walking_by_address`、`maps_direction_driving_by_address`、`maps_direction_transit_integrated_by_address`。
    - 实现坐标、评分、价格、天气温度和 route summary 的 provider response normalization。

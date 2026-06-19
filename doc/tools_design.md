@@ -111,6 +111,7 @@ Future optional MCP tools:
 MVP usage:
 
 - Attraction and hotel search use `maps_text_search`.
+- Provider-facing city input should use Chinese city names, for example `北京`. In real MCP testing, English city names such as `Beijing` can produce unstable POI recall outside the intended city.
 - POI coordinate enrichment uses `maps_search_detail` first and `maps_geo` as a fallback when text-search results do not include usable coordinates.
 - Weather uses `maps_weather`.
 - Search detail, around search, geocode, and regeocode are available to specialist subgraphs for step-level search refinement, radius expansion, parking checks, approximate coordinate-distance checks, and richer POI normalization.
@@ -441,7 +442,7 @@ AMAP_MCP_COMMAND=amap-mcp-server
 AMAP_MCP_ARGS=
 ```
 
-The command can later be changed to another MCP launcher if needed.
+The command can later be changed to another MCP launcher if needed. In local development with the existing conda env, using the env executable directly or as a relative path is acceptable when `amap-mcp-server` is not on the shell `PATH`.
 
 ## Terminal Testing
 
@@ -450,9 +451,9 @@ Before full graph testing, tools should be tested independently.
 Examples:
 
 ```text
-search attractions in Beijing with keyword "历史文化"
-query Beijing weather
-search economy hotels in Beijing
+search attractions in 北京 with keyword "历史文化"
+query 北京 weather
+search economy hotels in 北京
 normalize a real Amap coordinate string
 ```
 

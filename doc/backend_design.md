@@ -242,6 +242,7 @@ Backend validation:
 - `session_id` may be absent on the first request; the backend resolves it before graph execution.
 - Date range must be valid.
 - `cities` must be a non-empty list of valid strings.
+- For the current Amap-backed implementation, `cities` should be Chinese city names such as `["北京"]`; English city names are not reliable provider-facing inputs for Amap POI search.
 - Preference indexes must match supported enum values.
 - Budget, if provided, must be non-negative.
 

@@ -9,9 +9,9 @@ from app.agents.context import assemble_planner_context
 from app.agents.hotel_search import make_hotel_search_node
 from app.agents.nodes import (
     initialize_working_state,
+    make_planner_node,
     make_weather_query_node,
     normalize_request,
-    planner_node,
     validate_trip_plan,
 )
 from app.schemas.graph import TravelPlanState
@@ -47,7 +47,7 @@ def build_travel_planner_graph(amap_client=None, llm_service=None):
     graph.add_node("HotelSearchSubgraph", make_hotel_search_node(amap_client, llm_service))
     graph.add_node("WeatherQueryNode", make_weather_query_node(amap_client))
     graph.add_node("ContextAssemblyNode", assemble_planner_context)
-    graph.add_node("PlannerNode", planner_node)
+    graph.add_node("PlannerNode", make_planner_node(llm_service))
     graph.add_node("ValidateTripPlanNode", validate_trip_plan)
 
     graph.add_edge(START, "InitializeWorkingState")

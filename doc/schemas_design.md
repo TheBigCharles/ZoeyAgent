@@ -179,6 +179,7 @@ Design notes:
 
 - `start_date` and `end_date` should be real `date` values, not free-form strings.
 - `cities` is a non-empty list of valid city strings.
+- For the current Amap-backed implementation, frontend requests should pass Chinese city names in `cities`, for example `["北京"]`. Amap POI search is not reliable with English city names such as `["Beijing"]`, which may return POIs outside the requested city.
 - `preferences` is a structured object containing enum indexes from the frontend.
 - `transport_preference = 0` means `public_transport`, covering bus, train, subway, and taxi.
 - Preference enum indexes are converted into English enum values during normalization. Frontend display translation is not a backend concern.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -51,6 +52,8 @@ def make_hotel_search_node(
     llm_service: Any | None = None,
     context_builder: SpecialistContextBuilder | None = None,
     max_retries: int = 2,
+    route_summary_timeout_seconds: float = 5.0,
+    max_route_summary_candidates: int = 1,
 ):
     async def hotel_search_node(state: TravelPlanState) -> dict[str, Any]:
         observations = list(state.get("tool_observations", []))
@@ -115,6 +118,8 @@ def make_hotel_search_node(
                 state=state,
                 hotels=new_candidates,
                 observations=local_state.local_observations,
+                timeout_seconds=route_summary_timeout_seconds,
+                max_candidates=max_route_summary_candidates,
             )
             local_state.partial_candidates = _rank_hotels(
                 _deduplicate([*local_state.partial_candidates, *route_candidates]),
@@ -325,6 +330,8 @@ async def _maybe_enrich_route_summaries(
     state: TravelPlanState,
     hotels: list[Hotel],
     observations: list[str],
+    timeout_seconds: float,
+    max_candidates: int,
 ) -> list[Hotel]:
     if not hasattr(amap_client, "get_route_summary"):
         return hotels
@@ -335,17 +342,23 @@ async def _maybe_enrich_route_summaries(
 
     enriched: list[Hotel] = []
     mode = _route_mode(state["normalized_request"].transport_preference)
-    for hotel in hotels:
+    for index, hotel in enumerate(hotels):
+        if index >= max_candidates:
+            enriched.append(hotel)
+            continue
         if not (hotel.address or hotel.name):
             enriched.append(hotel)
             continue
         try:
-            summary = await amap_client.get_route_summary(
-                origin_address=hotel.address or hotel.name,
-                destination_address=anchor.address or anchor.name,
-                mode=mode,
-                origin_city=hotel.city,
-                destination_city=anchor.city,
+            summary = await asyncio.wait_for(
+                amap_client.get_route_summary(
+                    origin_address=hotel.address or hotel.name,
+                    destination_address=anchor.address or anchor.name,
+                    mode=mode,
+                    origin_city=hotel.city,
+                    destination_city=anchor.city,
+                ),
+                timeout=timeout_seconds,
             )
         except Exception as exc:
             observations.append(f"Hotel route summary failed for {hotel.name}: {type(exc).__name__}.")

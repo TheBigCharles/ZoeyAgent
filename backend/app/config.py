@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     )
 
     app_env: str = Field(default="local", alias="APP_ENV")
+    host: str = Field(default="127.0.0.1", alias="HOST")
+    port: int = Field(default=8000, alias="PORT")
     postgres_url: str | None = Field(default=None, alias="POSTGRES_URL")
 
     llm_base_url: str = Field(default="https://api.openai.com/v1", alias="LLM_BASE_URL")

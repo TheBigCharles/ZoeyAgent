@@ -187,6 +187,70 @@ def test_hotel_search_enriches_route_summary_when_client_supports_it() -> None:
     assert hotel.transit_method == "transit"
 
 
+def test_hotel_search_route_summary_timeout_does_not_block_result() -> None:
+    class SlowRouteAmap(FakeAmap):
+        async def get_route_summary(
+            self,
+            origin_address: str,
+            destination_address: str,
+            mode: str,
+            origin_city: str | None = None,
+            destination_city: str | None = None,
+        ) -> dict:
+            await asyncio.sleep(0.2)
+            return {
+                "route_distance_km": 2.5,
+                "route_duration_minutes": 18,
+                "transit_method": mode,
+            }
+
+    llm = FakeLLM(
+        [
+            llm_response({"steps": [{"city": "Beijing", "anchor": "故宫", "intent": "hotel", "suggested_keywords": ["酒店"]}]}),
+            llm_response(
+                {
+                    "tool_name": "search_hotels",
+                    "keywords": "酒店",
+                    "city": "北京",
+                    "anchor": "故宫",
+                    "rationale": "Search hotels.",
+                }
+            ),
+        ]
+    )
+    amap = SlowRouteAmap(
+        [
+            [
+                Hotel(
+                    name=f"Slow Route Hotel {index}",
+                    city="北京市",
+                    address=f"酒店路{index}号",
+                    poi_id=f"H-SLOW-{index}",
+                    estimated_cost=450,
+                    location=Location(longitude=116.4 + index * 0.001, latitude=39.91),
+                )
+                for index in range(4)
+            ]
+        ]
+    )
+
+    async def run_node() -> TravelPlanState:
+        node = make_hotel_search_node(
+            amap_client=amap,
+            llm_service=llm,
+            max_retries=0,
+            route_summary_timeout_seconds=0.01,
+        )
+        return await asyncio.wait_for(node(state()), timeout=0.5)
+
+    result = asyncio.run(run_node())
+
+    assert len(result["hotels"]) == 4
+    assert result["hotels"][0].distance_to_main_area_km is None
+    assert any("Hotel route summary failed" in observation for observation in result["tool_observations"])
+    assert result["hotel_search_result"].selected_hotel is not None
+
+
 def test_hotel_search_deduplicates_and_ranks_map_ready_candidates() -> None:
     llm = FakeLLM(
         [
