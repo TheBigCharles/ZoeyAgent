@@ -13,7 +13,21 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 
 ## 本地启动
 
-当前开发环境以 conda env `zoey_agent` 为准；VS Code PowerShell 里 `conda activate zoey_agent` 可能不会把 `python.exe` 切到 env 内，所以推荐显式使用 env 里的 Python 启动：先确认 `backend/.env` 中有 `HOST=127.0.0.1`、`PORT=8000`、`LLM_*`、`AMAP_MAPS_API_KEY` 和 `AMAP_MCP_COMMAND`，然后在任意工作目录运行 `C:\Users\awateryMan\anaconda3\envs\zoey_agent\python.exe C:\dev\X\ZoeyAgent\backend\run_server.py`；`run_server.py` 会自动切到 `backend`、读取 `backend/.env`，并启动 `app.api.main:app`。Amap MCP 由 FastAPI 后端通过 stdio 启动，不需要单独开一个 HTTP MCP server；若 `AMAP_MCP_COMMAND=amap-mcp-server` 在当前 shell 找不到命令，可以改为 conda env 内可执行文件的相对路径：
+在一个 PowerShell 里启动后端：
+
+```powershell
+C:\Users\awateryMan\anaconda3\envs\zoey_agent\python.exe C:\dev\X\ZoeyAgent\backend\run_server.py
+```
+
+在另一个 PowerShell 里调用测试请求：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/trip/plan" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  --data-binary "@trip-request.json"
+```
+
+`backend/.env` 中的 Amap MCP 可执行文件建议使用正斜杠路径，避免 Windows 反斜杠被 `.env` 解析成转义字符：
 
 ```text
 AMAP_MCP_COMMAND=../../../../Users/awateryMan/anaconda3/envs/zoey_agent/Scripts/amap-mcp-server.exe
