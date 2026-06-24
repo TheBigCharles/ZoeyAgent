@@ -13,6 +13,9 @@ from app.services.amap_service import build_map_points
 from app.services.llm_service import validate_structured_output
 
 
+MAX_REPAIR_ATTEMPTS = 2
+
+
 async def initialize_working_state(state: TravelPlanState) -> dict[str, Any]:
     request = state["request"]
     return {
@@ -134,7 +137,7 @@ def _planner_messages(state: TravelPlanState) -> list[dict[str, str]]:
             "content": (
                 "你是主旅行规划 PlannerNode。只返回合法 JSON，不要返回 markdown。"
                 "输出必须匹配 TripPlan schema，并包含 resolved session_id。"
-                "必须为每一天生成 exactly one breakfast, one lunch, one dinner。"
+                "餐食规划暂时 deferred；meals 可以为空或只包含已有候选，不要为了凑三餐编造餐厅。"
                 "可以使用 route_distance_km、route_duration_minutes、transit_method 这类路线摘要，"
                 "不要输出完整 turn-by-turn 路线步骤，不要求 image_url。"
             ),
@@ -157,6 +160,8 @@ def _planner_messages(state: TravelPlanState) -> list[dict[str, str]]:
                 f"attraction_preferences={normalized.attraction_preferences}\n"
                 f"budget={normalized.budget}\n"
                 f"extra_requirements={normalized.extra_requirements}\n\n"
+                f"previous_validation_errors={state.get('validation_errors', [])}\n"
+                f"repair_attempt_count={state.get('retry_count', 0)}\n\n"
                 f"planner_context=\n{state.get('planner_context', '')}\n\n"
                 f"attraction_candidates={_dump_models(state.get('attractions', []))}\n"
                 f"hotel_candidates={_dump_models(state.get('hotels', []))}\n"
@@ -273,8 +278,84 @@ def _overall_suggestions(normalized: NormalizedTripRequest, attractions: list[At
 
 
 async def validate_trip_plan(state: TravelPlanState) -> dict[str, Any]:
-    trip_plan = TripPlan.model_validate(state["trip_plan"])
+    observations = list(state.get("tool_observations", []))
+    try:
+        trip_plan = TripPlan.model_validate(state["trip_plan"])
+    except Exception as exc:
+        errors = [f"TripPlan schema validation failed: {type(exc).__name__}."]
+        observations.append(f"Validation failed: {'; '.join(errors)}")
+        return {
+            "validation_errors": errors,
+            "retry_count": state.get("retry_count", 0) + 1,
+            "tool_observations": observations,
+        }
+
+    errors = _business_validation_errors(trip_plan, state)
+    if errors:
+        observations.append(f"Validation failed: {'; '.join(errors)}")
+        return {
+            "trip_plan": trip_plan,
+            "validation_errors": errors,
+            "retry_count": state.get("retry_count", 0) + 1,
+            "tool_observations": observations,
+        }
+
     return {
         "trip_plan": trip_plan,
         "validation_errors": [],
     }
+
+
+def route_after_validation(state: TravelPlanState) -> str:
+    if not state.get("validation_errors"):
+        return "valid"
+    if state.get("retry_count", 0) <= MAX_REPAIR_ATTEMPTS:
+        return "repair"
+    return "fallback"
+
+
+async def fallback_node(state: TravelPlanState) -> dict[str, Any]:
+    observations = list(state.get("tool_observations", []))
+    observations.append("FallbackNode returned deterministic plan after repair limit.")
+    return {
+        "trip_plan": _build_deterministic_trip_plan(state),
+        "tool_observations": observations,
+    }
+
+
+def _business_validation_errors(trip_plan: TripPlan, state: TravelPlanState) -> list[str]:
+    normalized = state.get("normalized_request")
+    errors: list[str] = []
+
+    if normalized is not None:
+        if trip_plan.session_id != normalized.session_id:
+            errors.append("session_id must match resolved session_id")
+        if trip_plan.cities != normalized.cities:
+            errors.append("cities must match normalized request cities")
+        if trip_plan.start_date != normalized.start_date or trip_plan.end_date != normalized.end_date:
+            errors.append("date range must match normalized request")
+
+    for expected_index, day in enumerate(trip_plan.days):
+        expected_date = trip_plan.start_date + timedelta(days=expected_index)
+        if day.day_index != expected_index:
+            errors.append(f"days[{expected_index}].day_index must be {expected_index}")
+        if day.date != expected_date:
+            errors.append(f"days[{expected_index}].date must be {expected_date.isoformat()}")
+        for point_index, point in enumerate(day.map_points):
+            if point.day_index is not None and point.day_index != day.day_index:
+                errors.append(
+                    f"days[{expected_index}].map_points[{point_index}].day_index must match day_index"
+                )
+        if _has_located_entities(day) and not day.map_points:
+            errors.append(f"days[{expected_index}].map_points must include anchors for located entities")
+
+    return errors
+
+
+def _has_located_entities(day: DayPlan) -> bool:
+    return (
+        any(attraction.location is not None for attraction in day.attractions)
+        or day.hotel is not None
+        and day.hotel.location is not None
+        or any(meal.location is not None for meal in day.meals)
+    )

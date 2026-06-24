@@ -131,7 +131,7 @@ def test_context_assembly_node_writes_planner_context_sections() -> None:
                 "normalized_request": None,
                 "semantic_memories": ["User prefers relaxed travel."],
                 "tool_observations": ["Amap search retained 9 attractions."],
-                "validation_errors": ["Need exactly three meals."],
+                "validation_errors": ["Day 1 date does not match day_index."],
             }
         )
 

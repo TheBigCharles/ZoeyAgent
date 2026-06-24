@@ -666,7 +666,7 @@ Validation happens at four boundaries:
 `ValidateTripPlanNode` should also enforce the day-centric contract:
 
 - `TripPlan.session_id` must be present and non-empty.
-- Each day contains exactly one `breakfast`, one `lunch`, and one `dinner`.
+- Meals are deferred and are not a hard validation requirement in the current MVP.
 - Each day has `total_price >= 0`.
 - Each day owns its own `map_points`.
 - No top-level `budget` or top-level `map_points` field is required in the response.

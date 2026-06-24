@@ -7,6 +7,10 @@ from app.services.amap_service import AmapMCPService
 from app.services.amap_service import build_map_points
 
 
+def make_settings() -> Settings:
+    return Settings(_env_file=None, AMAP_MAPS_API_KEY="test-key")
+
+
 class FakeMCPClient:
     def __init__(self, responses: dict[str, dict]):
         self.responses = responses
@@ -18,7 +22,7 @@ class FakeMCPClient:
 
 
 def test_settings_use_real_amap_mcp_stdio_defaults_and_api_key_name() -> None:
-    settings = Settings(AMAP_MAPS_API_KEY="test-key")
+    settings = make_settings()
 
     assert settings.amap_api_key == "test-key"
     assert settings.amap_mcp_command == "amap-mcp-server"
@@ -43,7 +47,7 @@ def test_search_attractions_uses_maps_text_search_and_normalizes_pois() -> None:
             }
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     attractions = asyncio.run(service.search_attractions(keywords="故宫", city="北京"))
 
@@ -80,7 +84,7 @@ def test_search_hotels_uses_maps_text_search_and_normalizes_candidates() -> None
             }
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     hotels = asyncio.run(service.search_hotels(keywords="酒店", city="北京"))
 
@@ -117,7 +121,7 @@ def test_get_weather_uses_maps_weather_and_normalizes_forecast_casts() -> None:
             }
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     weather = asyncio.run(service.get_weather(city="北京"))
 
@@ -151,7 +155,7 @@ def test_get_weather_normalizes_amap_mcp_top_level_forecasts() -> None:
             }
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     weather = asyncio.run(service.get_weather(city="北京"))
 
@@ -177,7 +181,7 @@ def test_get_route_summary_uses_address_direction_tool_and_drops_detailed_steps(
             }
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     summary = asyncio.run(
         service.get_route_summary(
@@ -231,7 +235,7 @@ def test_search_attractions_enriches_missing_location_from_poi_detail() -> None:
             },
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     attractions = asyncio.run(service.search_attractions(keywords="Palace", city="Beijing"))
 
@@ -278,7 +282,7 @@ def test_search_hotels_falls_back_to_maps_geo_when_detail_has_no_location() -> N
             },
         }
     )
-    service = AmapMCPService(settings=Settings(AMAP_MAPS_API_KEY="test-key"), client=fake_client)
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
 
     hotels = asyncio.run(service.search_hotels(keywords="Hotel", city="Beijing"))
 

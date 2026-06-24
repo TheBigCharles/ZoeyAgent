@@ -748,7 +748,7 @@ Responsibilities:
 - Validate the LLM output with Pydantic.
 - Ensure required fields are present.
 - Ensure dates, days, weather entries, daily map points, daily totals, and nested models are coherent.
-- Ensure every day contains exactly one `breakfast`, one `lunch`, and one `dinner`.
+- Do not require three meals per day in the current MVP; meal planning is deferred.
 - Ensure every day has `total_price >= 0`.
 - Do not require top-level `budget` or top-level `map_points`; these are intentionally not part of the response contract.
 - Ensure enum-like schema fields use English values.

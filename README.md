@@ -294,7 +294,7 @@ flowchart TB
 - `WeatherQueryNode`：只负责按城市和日期查询天气，不需要 LLM。
 - `HotelSearchSubgraph`：LLM ReAct 风格的酒店搜索子图，基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
 - `PlannerNode`：使用 planner context 生成可渲染的 `TripPlan` 草稿。
-- `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、每日三餐、价格和 map points。
+- `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、day index、价格和 map points；餐食规划暂时不作为强校验条件。
 - `SaveMemoryNode`：只在 `TripPlan` 校验成功后保存长期记忆，避免把无效计划写入 memory。
 - `FallbackNode`：在多次 repair 失败后返回保守可控的结果或结构化错误，避免 graph 无限重试。
 - `TripPlan`：最终返回给前端直接渲染的响应模型，包含 resolved `session_id`、每日行程、天气和整体建议。
@@ -418,13 +418,13 @@ flowchart TB
    - 将景点、酒店、天气、预算、偏好和 extra requirements 汇总为 planner context。
    - 生成完整 `TripPlan`，包括每日 attractions、meals、hotel、map_points、total_price 和 route summary。
    - 不输出完整路线步骤，不要求 `image_url`。
-   - 验证方式：用固定 planner 输入测试每天都有三餐、每日价格、地图点和合理的日期数量。
+   - 验证方式：用固定 planner 输入测试每日价格、地图点和合理的日期数量；餐食可为空，等后续 meal 能力接入后再强化。
 
 14. 强化 ValidateTripPlanNode、repair 和 fallback
-   - 校验每日三餐、每日价格、日期数量、map points、枚举值和 day-centric response contract。
+   - 校验日期数量、每日 `day_index`、每日价格、map points、枚举值和 day-centric response contract；不校验每日三餐。
    - 失败时带着 validation errors 回到 planner 修复。
    - 超过 retry 上限后进入 `FallbackNode`，返回保守可用结果或结构化错误。
-   - 验证方式：构造缺餐、日期数量错误、价格为负等坏输出，确认 validator 能拒绝并触发 repair 或 fallback。
+   - 验证方式：构造日期数量错误、日期和 `day_index` 不一致、价格为负、map points 缺失等坏输出，确认 validator 能拒绝并触发 repair 或 fallback。
 
 15. 接入 working memory
    - 使用 `InMemorySaver`，将解析后的 `session_id` 映射为 LangGraph `thread_id`。

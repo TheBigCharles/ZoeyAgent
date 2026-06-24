@@ -122,7 +122,7 @@ def test_weather_info_parses_temperature_strings() -> None:
     assert weather.night_temp == 18
 
 
-def test_day_plan_requires_exactly_one_meal_of_each_type() -> None:
+def test_day_plan_allows_deferred_meal_list() -> None:
     hotel = Hotel(name="测试酒店", city="北京", estimated_cost=500)
     attractions = [
         Attraction(
@@ -161,19 +161,31 @@ def test_day_plan_requires_exactly_one_meal_of_each_type() -> None:
         total_price=800,
     )
 
-    assert day.meals == meals
+    partial_meals_day = DayPlan(
+        date="2026-06-10",
+        day_index=0,
+        city="北京",
+        description="第一天",
+        transportation="public_transport",
+        accommodation="budget_hotel",
+        meals=meals[:2],
+        total_price=800,
+    )
 
-    with pytest.raises(ValidationError):
-        DayPlan(
-            date="2026-06-10",
-            day_index=0,
-            city="北京",
-            description="第一天",
-            transportation="public_transport",
-            accommodation="budget_hotel",
-            meals=meals[:2],
-            total_price=800,
-        )
+    no_meals_day = DayPlan(
+        date="2026-06-10",
+        day_index=0,
+        city="北京",
+        description="第一天",
+        transportation="public_transport",
+        accommodation="budget_hotel",
+        meals=[],
+        total_price=800,
+    )
+
+    assert day.meals == meals
+    assert [meal.type for meal in partial_meals_day.meals] == ["breakfast", "lunch"]
+    assert no_meals_day.meals == []
 
 
 def test_trip_plan_days_must_match_date_range() -> None:

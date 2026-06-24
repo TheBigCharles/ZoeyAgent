@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from datetime import date as Date
 from typing import Any, Literal
 
@@ -104,11 +103,3 @@ class DayPlan(BaseModel):
     route_duration_minutes: int | None = Field(default=None, ge=0, description="Estimated route summary duration")
     transit_method: str | None = Field(default=None, description="Summary transport mode for the day")
 
-    @field_validator("meals")
-    @classmethod
-    def validate_meals(cls, value: list[Meal]) -> list[Meal]:
-        meal_counts = Counter(meal.type for meal in value)
-        expected = {"breakfast": 1, "lunch": 1, "dinner": 1}
-        if dict(meal_counts) != expected:
-            raise ValueError("meals must contain exactly one breakfast, one lunch, and one dinner")
-        return value

@@ -79,6 +79,142 @@ class FakeAttractionLLM:
         raise AssertionError("unexpected prompt")
 
 
+def invalid_business_trip_payload() -> dict:
+    return {
+        "session_id": "session-graph-001",
+        "cities": ["Beijing"],
+        "start_date": "2026-06-10",
+        "end_date": "2026-06-12",
+        "days": [
+            {
+                "date": "2026-06-11",
+                "day_index": 0,
+                "city": "Beijing",
+                "description": "Wrong date for day index.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "meals": [],
+                "total_price": 120,
+            },
+            {
+                "date": "2026-06-11",
+                "day_index": 1,
+                "city": "Beijing",
+                "description": "No map point despite located attraction.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "attractions": [
+                    {
+                        "name": "Museum",
+                        "city": "Beijing",
+                        "location": {"longitude": 116.39, "latitude": 39.9},
+                    }
+                ],
+                "meals": [],
+                "map_points": [],
+                "total_price": 120,
+            },
+            {
+                "date": "2026-06-12",
+                "day_index": 2,
+                "city": "Beijing",
+                "description": "Valid date.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "meals": [],
+                "total_price": 120,
+            },
+        ],
+        "weather_info": [],
+        "overall_suggestions": "Invalid business plan.",
+    }
+
+
+def valid_business_trip_payload() -> dict:
+    return {
+        "session_id": "session-graph-001",
+        "cities": ["Beijing"],
+        "start_date": "2026-06-10",
+        "end_date": "2026-06-12",
+        "days": [
+            {
+                "date": "2026-06-10",
+                "day_index": 0,
+                "city": "Beijing",
+                "description": "Fixed day 1.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "meals": [],
+                "total_price": 120,
+            },
+            {
+                "date": "2026-06-11",
+                "day_index": 1,
+                "city": "Beijing",
+                "description": "Fixed day 2.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "attractions": [
+                    {
+                        "name": "Museum",
+                        "city": "Beijing",
+                        "location": {"longitude": 116.39, "latitude": 39.9},
+                    }
+                ],
+                "meals": [],
+                "map_points": [
+                    {
+                        "name": "Museum",
+                        "city": "Beijing",
+                        "location": {"longitude": 116.39, "latitude": 39.9},
+                        "day_index": 1,
+                        "order_index": 0,
+                        "point_type": "attraction",
+                    }
+                ],
+                "total_price": 120,
+            },
+            {
+                "date": "2026-06-12",
+                "day_index": 2,
+                "city": "Beijing",
+                "description": "Fixed day 3.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "meals": [],
+                "total_price": 120,
+            },
+        ],
+        "weather_info": [],
+        "overall_suggestions": "Fixed by repair.",
+    }
+
+
+class RepairingPlannerLLM(FakeAttractionLLM):
+    def __init__(self) -> None:
+        self.planner_calls = 0
+
+    async def complete(self, messages: list[dict], **kwargs: object) -> dict:
+        text = "\n".join(message["content"] for message in messages)
+        if "你是主旅行规划 PlannerNode" not in text:
+            return await super().complete(messages, **kwargs)
+        self.planner_calls += 1
+        payload = invalid_business_trip_payload() if self.planner_calls == 1 else valid_business_trip_payload()
+        return llm_response(payload)
+
+
+class AlwaysInvalidPlannerLLM(FakeAttractionLLM):
+    def __init__(self) -> None:
+        self.planner_calls = 0
+
+    async def complete(self, messages: list[dict], **kwargs: object) -> dict:
+        text = "\n".join(message["content"] for message in messages)
+        if "你是主旅行规划 PlannerNode" not in text:
+            return await super().complete(messages, **kwargs)
+        self.planner_calls += 1
+        return llm_response(invalid_business_trip_payload())
+
+
 def test_minimal_travel_planner_graph_outputs_valid_trip_plan() -> None:
     async def run_graph() -> TravelPlanState:
         graph = build_travel_planner_graph()
@@ -289,3 +425,46 @@ def test_travel_planner_graph_keeps_planning_when_attraction_search_fails() -> N
     assert len(result["weather_info"]) == 1
     assert trip_plan.weather_info == result["weather_info"]
     assert any("Attraction search tool failure" in observation for observation in result["tool_observations"])
+
+
+def test_travel_planner_graph_repairs_business_validation_errors_without_requiring_meals() -> None:
+    async def run_graph() -> tuple[TravelPlanState, RepairingPlannerLLM]:
+        llm = RepairingPlannerLLM()
+        graph = build_travel_planner_graph(llm_service=llm)
+        request = make_request()
+        result = await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+        return result, llm
+
+    result, llm = asyncio.run(run_graph())
+    trip_plan = TripPlan.model_validate(result["trip_plan"])
+
+    assert llm.planner_calls == 2
+    assert result["validation_errors"] == []
+    assert result["retry_count"] == 1
+    assert trip_plan.overall_suggestions == "Fixed by repair."
+    assert trip_plan.days[0].meals == []
+    assert any("Validation failed" in observation for observation in result["tool_observations"])
+
+
+def test_travel_planner_graph_falls_back_after_repair_limit() -> None:
+    async def run_graph() -> tuple[TravelPlanState, AlwaysInvalidPlannerLLM]:
+        llm = AlwaysInvalidPlannerLLM()
+        graph = build_travel_planner_graph(llm_service=llm)
+        request = make_request()
+        result = await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+        return result, llm
+
+    result, llm = asyncio.run(run_graph())
+    trip_plan = TripPlan.model_validate(result["trip_plan"])
+
+    assert llm.planner_calls == 3
+    assert result["validation_errors"]
+    assert result["retry_count"] == 3
+    assert trip_plan.overall_suggestions != "Invalid business plan."
+    assert any("FallbackNode returned deterministic plan" in observation for observation in result["tool_observations"])
