@@ -4,20 +4,67 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.schemas.memory import MemoryCandidate, WorkingMemoryMaintenanceResult
+
 MAX_WORKING_MEMORY_ITEMS = 50
 
 
-def append_working_message(messages: list[dict[str, Any]] | None, message: dict[str, Any]) -> list[dict[str, Any]]:
-    return _latest([*(messages or []), message])
+def merge_memory_candidates(
+    existing: list[MemoryCandidate] | None,
+    new_candidates: list[MemoryCandidate] | None,
+) -> list[MemoryCandidate]:
+    seen = {(candidate.target, " ".join(candidate.text.casefold().split())) for candidate in existing or []}
+    merged = list(existing or [])
+    for candidate in new_candidates or []:
+        key = (candidate.target, " ".join(candidate.text.casefold().split()))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(candidate)
+    return merged
 
 
-def append_tool_observation(observations: list[Any] | None, observation: Any) -> list[Any]:
-    return _latest([*(observations or []), observation])
+def maintain_working_messages(
+    messages: list[dict[str, Any]] | None,
+    message: dict[str, Any],
+    *,
+    extraction_service: Any | None = None,
+    existing_candidates: list[MemoryCandidate] | None = None,
+) -> WorkingMemoryMaintenanceResult:
+    return _maintain([*(messages or []), message], "working_messages_overflow", extraction_service, existing_candidates)
 
 
-def extend_tool_observations(observations: list[Any] | None, new_observations: list[Any]) -> list[Any]:
-    return _latest([*(observations or []), *new_observations])
+def maintain_tool_observations(
+    observations: list[Any] | None,
+    observation: Any | None,
+    *,
+    extraction_service: Any | None = None,
+    existing_candidates: list[MemoryCandidate] | None = None,
+) -> WorkingMemoryMaintenanceResult:
+    values = list(observations or [])
+    if observation is not None:
+        values.append(observation)
+    return _maintain(values, "tool_observations_overflow", extraction_service, existing_candidates)
 
 
-def _latest(values: list[Any]) -> list[Any]:
-    return values[-MAX_WORKING_MEMORY_ITEMS:]
+def _maintain(
+    values: list[Any],
+    source: str,
+    extraction_service: Any | None,
+    existing_candidates: list[MemoryCandidate] | None,
+) -> WorkingMemoryMaintenanceResult:
+    overflow = values[:-MAX_WORKING_MEMORY_ITEMS]
+    retained = values[-MAX_WORKING_MEMORY_ITEMS:]
+    candidates: list[MemoryCandidate] = []
+    if overflow and extraction_service is not None:
+        extracted = extraction_service.extract_from_overflow(
+            source=source,
+            items=overflow,
+            existing_candidates=existing_candidates,
+        )
+        candidates = [candidate for candidate in extracted if candidate.target != "discard"]
+    return WorkingMemoryMaintenanceResult(
+        retained_messages=retained,
+        extracted_candidates=candidates,
+        dropped_count=len(overflow),
+    )

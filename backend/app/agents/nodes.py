@@ -8,10 +8,16 @@ from typing import Any
 from app.config import exception_details
 from app.schemas.domain import Attraction, DayPlan, Hotel, Meal
 from app.schemas.graph import NormalizedTripRequest, TravelPlanState
+from app.schemas.memory import MemoryCandidate
 from app.schemas.trip import TripPlan
 from app.services.amap_service import build_map_points
 from app.services.llm_service import validate_structured_output
-from app.agents.working_memory import append_tool_observation, append_working_message
+from app.agents.working_memory import (
+    maintain_tool_observations,
+    maintain_working_messages,
+    merge_memory_candidates,
+)
+from app.memory.extraction import MemoryExtractionService
 
 
 MAX_REPAIR_ATTEMPTS = 2
@@ -27,11 +33,26 @@ async def initialize_working_state(state: TravelPlanState) -> dict[str, Any]:
             f"Extra requirements: {request.extra_requirements or '(none)'}"
         ),
     }
+    memory_candidates = list(state.get("memory_candidates", []))
+    working_result = maintain_working_messages(
+        state.get("working_messages"),
+        working_message,
+        extraction_service=MemoryExtractionService(),
+        existing_candidates=memory_candidates,
+    )
+    memory_candidates = merge_memory_candidates(memory_candidates, working_result.extracted_candidates)
+    tool_result = maintain_tool_observations(
+        state.get("tool_observations"),
+        None,
+        extraction_service=MemoryExtractionService(),
+        existing_candidates=memory_candidates,
+    )
+    memory_candidates = merge_memory_candidates(memory_candidates, tool_result.extracted_candidates)
     return {
-        "working_messages": append_working_message(state.get("working_messages"), working_message),
+        "working_messages": working_result.retained_messages,
         "trip_draft": {},
-        "tool_observations": state.get("tool_observations", [])[-50:],
-        "memory_candidates": state.get("memory_candidates", []),
+        "tool_observations": tool_result.retained_messages,
+        "memory_candidates": memory_candidates,
         "semantic_memories": state.get("semantic_memories", []),
         "episodic_memories": state.get("episodic_memories", []),
         "context_packets": [],
@@ -73,11 +94,13 @@ def make_weather_query_node(amap_client: Any | None = None):
     async def weather_query_node(state: TravelPlanState) -> dict[str, Any]:
         weather_info = list(state.get("weather_info", []))
         observations = list(state.get("tool_observations", []))
+        memory_candidates = list(state.get("memory_candidates", []))
 
         if amap_client is None:
             return {
                 "weather_info": weather_info,
                 "tool_observations": observations,
+                "memory_candidates": memory_candidates,
             }
 
         normalized = state["normalized_request"]
@@ -85,21 +108,24 @@ def make_weather_query_node(amap_client: Any | None = None):
             try:
                 city_weather = await amap_client.get_weather(city)
             except Exception as exc:
-                observations = append_tool_observation(
+                observations, memory_candidates = _maintain_tool_observation(
                     observations,
                     f"Amap weather query for {city} failed: {type(exc).__name__}.",
+                    memory_candidates,
                 )
                 continue
 
             weather_info.extend(city_weather)
-            observations = append_tool_observation(
+            observations, memory_candidates = _maintain_tool_observation(
                 observations,
                 f"Amap weather query for {city} returned {len(city_weather)} records.",
+                memory_candidates,
             )
 
         return {
             "weather_info": weather_info,
             "tool_observations": observations,
+            "memory_candidates": memory_candidates,
         }
 
     return weather_query_node
@@ -112,14 +138,16 @@ def make_planner_node(llm_service: Any | None = None):
                 return {"trip_plan": await _generate_llm_trip_plan(state, llm_service)}
             except Exception as exc:
                 observations = list(state.get("tool_observations", []))
-                observations = append_tool_observation(
+                observations, memory_candidates = _maintain_tool_observation(
                     observations,
                     f"Planner LLM failed; used deterministic fallback. {exception_details(exc)}",
+                    state.get("memory_candidates", []),
                 )
                 fallback = _build_deterministic_trip_plan(state)
                 return {
                     "trip_plan": fallback,
                     "tool_observations": observations,
+                    "memory_candidates": memory_candidates,
                 }
 
         return {"trip_plan": _build_deterministic_trip_plan(state)}
@@ -286,25 +314,36 @@ def _overall_suggestions(normalized: NormalizedTripRequest, attractions: list[At
 
 async def validate_trip_plan(state: TravelPlanState) -> dict[str, Any]:
     observations = list(state.get("tool_observations", []))
+    memory_candidates = list(state.get("memory_candidates", []))
     try:
         trip_plan = TripPlan.model_validate(state["trip_plan"])
     except Exception as exc:
         errors = [f"TripPlan schema validation failed: {type(exc).__name__}."]
-        observations = append_tool_observation(observations, f"Validation failed: {'; '.join(errors)}")
+        observations, memory_candidates = _maintain_tool_observation(
+            observations,
+            f"Validation failed: {'; '.join(errors)}",
+            memory_candidates,
+        )
         return {
             "validation_errors": errors,
             "retry_count": state.get("retry_count", 0) + 1,
             "tool_observations": observations,
+            "memory_candidates": memory_candidates,
         }
 
     errors = _business_validation_errors(trip_plan, state)
     if errors:
-        observations = append_tool_observation(observations, f"Validation failed: {'; '.join(errors)}")
+        observations, memory_candidates = _maintain_tool_observation(
+            observations,
+            f"Validation failed: {'; '.join(errors)}",
+            memory_candidates,
+        )
         return {
             "trip_plan": trip_plan,
             "validation_errors": errors,
             "retry_count": state.get("retry_count", 0) + 1,
             "tool_observations": observations,
+            "memory_candidates": memory_candidates,
         }
 
     return {
@@ -323,10 +362,29 @@ def route_after_validation(state: TravelPlanState) -> str:
 
 async def fallback_node(state: TravelPlanState) -> dict[str, Any]:
     observations = list(state.get("tool_observations", []))
-    observations = append_tool_observation(observations, "FallbackNode returned deterministic plan after repair limit.")
+    observations, memory_candidates = _maintain_tool_observation(
+        observations,
+        "FallbackNode returned deterministic plan after repair limit.",
+        state.get("memory_candidates", []),
+    )
     return {
         "trip_plan": _build_deterministic_trip_plan(state),
         "tool_observations": observations,
+        "memory_candidates": memory_candidates,
+    }
+
+
+async def save_memory_node(state: TravelPlanState) -> dict[str, Any]:
+    trip_plan = TripPlan.model_validate(state["trip_plan"])
+    existing_candidates = list(state.get("memory_candidates", []))
+    extracted = MemoryExtractionService().extract_from_final_plan(
+        trip_plan=trip_plan,
+        working_messages=state.get("working_messages", []),
+        tool_observations=state.get("tool_observations", []),
+        existing_candidates=existing_candidates,
+    )
+    return {
+        "memory_candidates": merge_memory_candidates(existing_candidates, extracted),
     }
 
 
@@ -366,3 +424,17 @@ def _has_located_entities(day: DayPlan) -> bool:
         and day.hotel.location is not None
         or any(meal.location is not None for meal in day.meals)
     )
+
+
+def _maintain_tool_observation(
+    observations: list[Any],
+    observation: Any,
+    memory_candidates: list[MemoryCandidate],
+) -> tuple[list[Any], list[MemoryCandidate]]:
+    result = maintain_tool_observations(
+        observations,
+        observation,
+        extraction_service=MemoryExtractionService(),
+        existing_candidates=memory_candidates,
+    )
+    return result.retained_messages, merge_memory_candidates(memory_candidates, result.extracted_candidates)

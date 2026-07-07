@@ -5,6 +5,7 @@ from datetime import date
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agents.trip_planner_agent import build_travel_planner_graph
+from app.agents.nodes import make_weather_query_node
 from app.schemas.domain import Attraction, Hotel, Location, WeatherInfo
 from app.schemas.graph import TravelPlanState
 from app.schemas.trip import TripPlan, TripPlanRequest, TripPreferencesInput
@@ -491,3 +492,45 @@ def test_travel_planner_graph_restores_working_memory_for_same_thread_id() -> No
     assert any("First session detail" in message for message in second_messages)
     assert any("Second session detail" in message for message in second_messages)
     assert len(second_result["working_messages"]) > len(first_result["working_messages"])
+
+
+def test_travel_planner_graph_extracts_memory_candidates_after_valid_trip_plan() -> None:
+    async def run_graph() -> TravelPlanState:
+        graph = build_travel_planner_graph()
+        request = make_request().model_copy(update={"extra_requirements": "我喜欢轻松节奏，不要太赶。"})
+        return await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+
+    result = asyncio.run(run_graph())
+
+    assert any(
+        candidate.target == "semantic" and "轻松节奏" in candidate.text
+        for candidate in result["memory_candidates"]
+    )
+    assert any(candidate.target == "episodic" for candidate in result["memory_candidates"])
+
+
+def test_weather_node_extracts_memory_candidates_when_tool_observations_overflow() -> None:
+    class WeatherClient:
+        async def get_weather(self, city: str) -> list[WeatherInfo]:
+            return []
+
+    async def run_node() -> TravelPlanState:
+        node = make_weather_query_node(WeatherClient())
+        state = {
+            "normalized_request": make_request().model_copy(update={"session_id": "session-graph-001"}),
+            "weather_info": [],
+            "memory_candidates": [],
+            "tool_observations": [
+                "用户选择了王府井附近酒店。",
+                *[f"observation {index}" for index in range(50)],
+            ],
+        }
+        return await node(state)
+
+    result = asyncio.run(run_node())
+
+    assert len(result["tool_observations"]) == 50
+    assert any(candidate.target == "episodic" and "王府井" in candidate.text for candidate in result["memory_candidates"])

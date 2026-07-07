@@ -8,7 +8,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.agents.context import SpecialistContextBuilder
+from app.agents.working_memory import maintain_tool_observations, merge_memory_candidates
 from app.config import exception_details
+from app.memory.extraction import MemoryExtractionService
 from app.schemas.domain import Attraction, Hotel
 from app.schemas.graph import HotelSearchResult, SearchQuality, TravelPlanState
 from app.services.llm_service import validate_structured_output
@@ -59,7 +61,7 @@ def make_hotel_search_node(
         observations = list(state.get("tool_observations", []))
         if amap_client is None or llm_service is None:
             result = _empty_result("Hotel search skipped because amap_client or llm_service is unavailable.")
-            return _write_back(result, observations)
+            return _write_back(result, state)
 
         local_state = HotelSearchLocalState()
         builder = context_builder or SpecialistContextBuilder()
@@ -70,7 +72,7 @@ def make_hotel_search_node(
                 "Hotel search LLM plan failed.",
                 details=exception_details(exc),
             )
-            return _write_back(result, observations)
+            return _write_back(result, state)
 
         attempts = max_retries + 1
         for attempt in range(1, attempts + 1):
@@ -156,7 +158,7 @@ def make_hotel_search_node(
             step_observations=local_state.local_observations,
             quality=final_quality,
         )
-        return _write_back(result, observations)
+        return _write_back(result, state)
 
     return hotel_search_node
 
@@ -261,11 +263,23 @@ def _empty_result(reason: str, details: dict[str, Any] | None = None) -> HotelSe
     )
 
 
-def _write_back(result: HotelSearchResult, existing_observations: list[Any]) -> dict[str, Any]:
+def _write_back(result: HotelSearchResult, state: TravelPlanState) -> dict[str, Any]:
+    observations = list(state.get("tool_observations", []))
+    memory_candidates = list(state.get("memory_candidates", []))
+    for observation in result.step_observations:
+        maintenance = maintain_tool_observations(
+            observations,
+            observation,
+            extraction_service=MemoryExtractionService(),
+            existing_candidates=memory_candidates,
+        )
+        observations = maintenance.retained_messages
+        memory_candidates = merge_memory_candidates(memory_candidates, maintenance.extracted_candidates)
     return {
         "hotel_search_result": result,
         "hotels": result.candidate_hotels,
-        "tool_observations": [*existing_observations, *result.step_observations],
+        "tool_observations": observations,
+        "memory_candidates": memory_candidates,
     }
 
 

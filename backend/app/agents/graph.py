@@ -14,6 +14,7 @@ from app.agents.nodes import (
     make_weather_query_node,
     normalize_request,
     route_after_validation,
+    save_memory_node,
     validate_trip_plan,
 )
 from app.schemas.graph import TravelPlanState
@@ -35,6 +36,7 @@ def build_travel_planner_graph(amap_client=None, llm_service=None, checkpointer=
     graph.add_node("ContextAssemblyNode", assemble_planner_context)
     graph.add_node("PlannerNode", make_planner_node(llm_service))
     graph.add_node("ValidateTripPlanNode", validate_trip_plan)
+    graph.add_node("SaveMemoryNode", save_memory_node)
     graph.add_node("FallbackNode", fallback_node)
 
     graph.add_edge(START, "InitializeWorkingState")
@@ -49,11 +51,12 @@ def build_travel_planner_graph(amap_client=None, llm_service=None, checkpointer=
         "ValidateTripPlanNode",
         route_after_validation,
         {
-            "valid": END,
+            "valid": "SaveMemoryNode",
             "repair": "PlannerNode",
             "fallback": "FallbackNode",
         },
     )
+    graph.add_edge("SaveMemoryNode", END)
     graph.add_edge("FallbackNode", END)
 
     return graph.compile(checkpointer=checkpointer)

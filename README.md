@@ -295,7 +295,7 @@ flowchart TB
 - `HotelSearchSubgraph`：LLM ReAct 风格的酒店搜索子图，基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
 - `PlannerNode`：使用 planner context 生成可渲染的 `TripPlan` 草稿。
 - `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、day index、价格和 map points；餐食规划暂时不作为强校验条件。
-- `SaveMemoryNode`：只在 `TripPlan` 校验成功后保存长期记忆，避免把无效计划写入 memory。
+- `SaveMemoryNode`：只在 `TripPlan` 校验成功后抽取长期记忆候选，避免从无效计划生成 memory；真正写入长期 store 留到 Step 17。
 - `FallbackNode`：在多次 repair 失败后返回保守可控的结果或结构化错误，避免 graph 无限重试。
 - `TripPlan`：最终返回给前端直接渲染的响应模型，包含 resolved `session_id`、每日行程、天气和整体建议。
 
@@ -429,7 +429,7 @@ flowchart TB
 15. 接入 working memory
    - 使用 `InMemorySaver`，将解析后的 `session_id` 映射为 LangGraph `thread_id`，并通过 `graph.compile(checkpointer=checkpointer)` 启用 checkpoint。
    - API 每次只提交当前 `TripPlanRequest`；同一 `thread_id` 的 `working_messages` 和 `tool_observations` 从 checkpoint 恢复。
-   - 实现 `append_working_message` 和 `append_tool_observation` 这类状态更新 helper。
+   - 实现 `maintain_working_messages` 和 `maintain_tool_observations` 这类统一状态更新 helper。
    - working memory 超过 50 条消息时触发 overflow policy，保留最新 50 条。
    - 保持 working memory 只服务当前进程和当前 session，不提前承诺持久化。
    - 验证方式：用相同 `session_id` 连续请求，确认进程存活期间 graph state 能被恢复。
@@ -437,13 +437,14 @@ flowchart TB
 16. 实现 MemoryExtractionService
    - 将工作记忆 overflow 和最终成功计划的记忆抽取统一到 `memory/extraction.py`。
    - 抽取 `MemoryCandidate`，分类为 semantic、episodic 或 discard。
-   - 对候选记忆做去重、置信度过滤和写入前校验。
-   - 验证方式：用固定 working messages 和 final `TripPlan` 测试分类、discard、dedup 和 dropped_count。
+   - 对候选记忆做去重、置信度过滤和写入前校验；这一阶段只产出候选，不写入长期 store。
+   - overflow 时在裁掉旧 working memory 前抽取 semantic/episodic 候选；final valid `TripPlan` 后通过 `SaveMemoryNode` 抽取本轮成功计划候选。
+   - 验证方式：用固定 working messages、overflow items 和 final `TripPlan` 测试分类、discard、dedup 和 dropped_count。
 
 17. 接入长期记忆
    - 配置 Postgres、pgvector、LangGraph `PostgresStore` 和本地 vLLM embedding endpoint。
    - 实现 `LoadMemoryNode` 搜索 semantic 和 episodic memories。
-   - 实现 `SaveMemoryNode`，只在 `TripPlan` 验证成功后通过 `MemoryExtractionService` 写入长期记忆。
+   - 扩展 `SaveMemoryNode`，只在 `TripPlan` 验证成功后把 `MemoryExtractionService` 产出的候选写入长期记忆。
    - 本地未配置 Postgres 时应允许关闭长期记忆，避免开发流程被基础设施阻塞。
    - 验证方式：分别测试 memory disabled、测试 store、真实 PostgresStore 三种路径。
 

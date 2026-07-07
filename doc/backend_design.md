@@ -554,5 +554,5 @@ Not part of the backend MVP:
 
 The backend is an async FastAPI service that wraps the LangGraph travel planner.
 
-The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Long-term semantic and episodic memory use `PostgresStore` with `pgvector` and `BAAI/bge-m3` embeddings. The MVP exposes one real planning endpoint, one reserved recalculation endpoint, health checks, and optional memory-inspection endpoints for terminal testing.
+The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Memory extraction currently produces semantic and episodic candidates from overflow and final valid plans; durable long-term memory will use `PostgresStore` with `pgvector` and `BAAI/bge-m3` embeddings in the next step. The MVP exposes one real planning endpoint, one reserved recalculation endpoint, health checks, and optional memory-inspection endpoints for terminal testing.
 

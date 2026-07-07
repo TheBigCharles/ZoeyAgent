@@ -7,7 +7,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.agents.context import SpecialistContextBuilder
+from app.agents.working_memory import maintain_tool_observations, merge_memory_candidates
 from app.config import exception_details
+from app.memory.extraction import MemoryExtractionService
 from app.schemas.domain import Attraction
 from app.schemas.graph import AttractionSearchResult, SearchQuality, TravelPlanState
 from app.services.llm_service import validate_structured_output
@@ -52,7 +54,7 @@ def make_attraction_search_node(
         observations = list(state.get("tool_observations", []))
         if amap_client is None or llm_service is None:
             result = _empty_result("Attraction search skipped because amap_client or llm_service is unavailable.")
-            return _write_back(result, observations)
+            return _write_back(result, state)
 
         local_state = AttractionSearchLocalState()
         builder = context_builder or SpecialistContextBuilder()
@@ -63,7 +65,7 @@ def make_attraction_search_node(
                 "Attraction search LLM plan failed.",
                 details=exception_details(exc),
             )
-            return _write_back(result, observations)
+            return _write_back(result, state)
 
         attempts = max_retries + 1
         for attempt in range(1, attempts + 1):
@@ -136,7 +138,7 @@ def make_attraction_search_node(
             step_observations=local_state.local_observations,
             quality=final_quality,
         )
-        return _write_back(result, observations)
+        return _write_back(result, state)
 
     return attraction_search_node
 
@@ -239,11 +241,23 @@ def _empty_result(reason: str, details: dict[str, Any] | None = None) -> Attract
     )
 
 
-def _write_back(result: AttractionSearchResult, existing_observations: list[Any]) -> dict[str, Any]:
+def _write_back(result: AttractionSearchResult, state: TravelPlanState) -> dict[str, Any]:
+    observations = list(state.get("tool_observations", []))
+    memory_candidates = list(state.get("memory_candidates", []))
+    for observation in result.step_observations:
+        maintenance = maintain_tool_observations(
+            observations,
+            observation,
+            extraction_service=MemoryExtractionService(),
+            existing_candidates=memory_candidates,
+        )
+        observations = maintenance.retained_messages
+        memory_candidates = merge_memory_candidates(memory_candidates, maintenance.extracted_candidates)
     return {
         "attraction_search_result": result,
         "attractions": result.attractions,
-        "tool_observations": [*existing_observations, *result.step_observations],
+        "tool_observations": observations,
+        "memory_candidates": memory_candidates,
     }
 
 

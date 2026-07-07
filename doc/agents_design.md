@@ -78,7 +78,7 @@ flowchart TD
     M --> N
 ```
 
-`WorkingMemoryMaintenanceNode` is shown as a conceptual checkpoint before context assembly. In implementation, working memory maintenance should primarily be enforced by helper functions around state updates, such as `append_working_message(...)` and `append_tool_observation(...)`. The conceptual node remains in the diagram to make the context hygiene boundary visible before `PlannerNode`.
+`WorkingMemoryMaintenanceNode` is shown as a conceptual checkpoint before context assembly. In implementation, working memory maintenance should primarily be enforced by helper functions around state updates, such as `maintain_working_messages(...)` and `maintain_tool_observations(...)`. The conceptual node remains in the diagram to make the context hygiene boundary visible before `PlannerNode`.
 
 ## Why Hotel Search Depends on Attraction Search
 
@@ -220,7 +220,7 @@ Output:
 Responsibilities:
 
 - Conceptually verify that working memory is bounded before `ContextAssemblyNode`.
-- In implementation, enforce the same policy through state-update helpers such as `append_working_message(...)` and `append_tool_observation(...)`.
+- In implementation, enforce the same policy through state-update helpers such as `maintain_working_messages(...)` and `maintain_tool_observations(...)`.
 - If `working_messages` exceeds 50 messages, take the oldest overflow messages.
 - Use `MemoryExtractionService` to extract semantic/episodic candidates from the overflow messages.
 - Deduplicate and write approved long-term candidates to `PostgresStore`.
@@ -231,7 +231,7 @@ This node does not summarize working memory and does not search working memory w
 Implementation policy:
 
 ```text
-append_working_message(state, message)
+maintain_working_messages(state, message)
   -> append message
   -> if len(working_messages) > 50:
        overflow = oldest messages beyond the 50-message limit

@@ -40,7 +40,7 @@ Do not implement perceptual memory for the MVP.
 The memory layer supports the agents workflow, especially these LangGraph nodes:
 
 - `LoadMemoryNode`: retrieves relevant semantic and episodic memories before planning.
-- `SaveMemoryNode`: writes useful long-term memories after a successful plan or important user decision.
+- `SaveMemoryNode`: extracts useful long-term memory candidates after a successful plan; durable writes are added in the long-term memory step.
 
 ## Scope
 
@@ -313,7 +313,7 @@ flowchart TD
 
 `LoadMemoryNode` runs before planning. It searches semantic and episodic memory using the user's request.
 
-`SaveMemoryNode` runs after successful plan validation. It extracts memory candidates from the current session, classifies them as semantic memory, episodic memory, or discard, deduplicates against existing memories, and writes useful long-term memories to the right namespace.
+`SaveMemoryNode` runs after successful plan validation. In the extraction step, it extracts memory candidates from the current session, classifies them as semantic memory, episodic memory, or discard, deduplicates against existing candidates, and keeps approved candidates in graph state. In the long-term memory step, it is extended to write useful semantic and episodic memories to the right namespace.
 
 ## Working Memory Extraction
 
@@ -327,7 +327,7 @@ Responsibilities:
 - Extract memory candidates.
 - Classify each candidate as semantic memory, episodic memory, or discard.
 - Deduplicate candidates against existing memories.
-- Write approved candidates to `PostgresStore`.
+- Return approved candidates for the current graph state. Durable writes to `PostgresStore` belong to the long-term memory step.
 
 Candidate shape:
 
@@ -347,12 +347,12 @@ Working memory keeps recent context, but it should not grow without bound.
 When a new prompt, LLM response, or tool observation is appended:
 
 ```text
-append_working_message(state, message)
+maintain_working_messages(state, message)
   -> append message
   -> if len(working_messages) > 50:
        overflow_messages = oldest messages beyond the 50-message limit
        MemoryExtractionService extracts semantic/episodic candidates
-       approved candidates are written to PostgresStore
+       approved candidates are added to memory_candidates
        overflow_messages are removed from working_messages
 ```
 
@@ -415,8 +415,9 @@ Discard:
    - Long-term preference -> semantic memory
    - Concrete confirmed/rejected/modified decision -> episodic memory
    - Temporary or duplicate detail -> discard
-8. Write extracted memories to `PostgresStore`.
-9. Return the response.
+8. Keep extracted candidates in graph state for the current step.
+9. In the long-term memory step, write approved semantic/episodic memories to `PostgresStore`.
+10. Return the response.
 
 ## Promotion Rules
 
@@ -451,7 +452,7 @@ In the agents workflow:
 
 - `LoadMemoryNode` retrieves semantic and episodic memories.
 - `PlannerNode` uses those memories to personalize the itinerary.
-- `SaveMemoryNode` writes important preferences and decisions back to memory.
+- `SaveMemoryNode` extracts important preferences and decisions as memory candidates; durable writes are handled by the long-term memory step.
 
 Working memory stays inside the active graph state and is discarded when the session ends, except for information promoted into long-term memory.
 
