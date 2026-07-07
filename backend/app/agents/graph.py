@@ -21,26 +21,10 @@ from app.schemas.trip import TripPlanRequest
 
 
 def build_initial_state(request: TripPlanRequest) -> TravelPlanState:
-    return {
-        "request": request,
-        "working_messages": [],
-        "trip_draft": {},
-        "tool_observations": [],
-        "memory_candidates": [],
-        "semantic_memories": [],
-        "episodic_memories": [],
-        "context_packets": [],
-        "planner_context": "",
-        "attractions": [],
-        "weather_info": [],
-        "hotels": [],
-        "trip_plan": None,
-        "validation_errors": [],
-        "retry_count": 0,
-    }
+    return {"request": request}
 
 
-def build_travel_planner_graph(amap_client=None, llm_service=None):
+def build_travel_planner_graph(amap_client=None, llm_service=None, checkpointer=None):
     """Build and compile the minimal async TravelPlannerGraph."""
     graph = StateGraph(TravelPlanState)
     graph.add_node("InitializeWorkingState", initialize_working_state)
@@ -72,4 +56,4 @@ def build_travel_planner_graph(amap_client=None, llm_service=None):
     )
     graph.add_edge("FallbackNode", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

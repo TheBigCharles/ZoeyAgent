@@ -2,6 +2,8 @@ import asyncio
 import json
 from datetime import date
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from app.agents.trip_planner_agent import build_travel_planner_graph
 from app.schemas.domain import Attraction, Hotel, Location, WeatherInfo
 from app.schemas.graph import TravelPlanState
@@ -468,3 +470,24 @@ def test_travel_planner_graph_falls_back_after_repair_limit() -> None:
     assert result["retry_count"] == 3
     assert trip_plan.overall_suggestions != "Invalid business plan."
     assert any("FallbackNode returned deterministic plan" in observation for observation in result["tool_observations"])
+
+
+def test_travel_planner_graph_restores_working_memory_for_same_thread_id() -> None:
+    async def run_graph() -> tuple[TravelPlanState, TravelPlanState]:
+        graph = build_travel_planner_graph(checkpointer=InMemorySaver())
+        first_request = make_request().model_copy(update={"extra_requirements": "First session detail"})
+        second_request = make_request().model_copy(update={"extra_requirements": "Second session detail"})
+        config = {"configurable": {"thread_id": first_request.session_id}}
+
+        first_result = await graph.ainvoke({"request": first_request}, config=config)
+        second_result = await graph.ainvoke({"request": second_request}, config=config)
+        return first_result, second_result
+
+    first_result, second_result = asyncio.run(run_graph())
+
+    first_messages = [message["content"] for message in first_result["working_messages"]]
+    second_messages = [message["content"] for message in second_result["working_messages"]]
+    assert any("First session detail" in message for message in first_messages)
+    assert any("First session detail" in message for message in second_messages)
+    assert any("Second session detail" in message for message in second_messages)
+    assert len(second_result["working_messages"]) > len(first_result["working_messages"])

@@ -427,7 +427,8 @@ flowchart TB
    - 验证方式：构造日期数量错误、日期和 `day_index` 不一致、价格为负、map points 缺失等坏输出，确认 validator 能拒绝并触发 repair 或 fallback。
 
 15. 接入 working memory
-   - 使用 `InMemorySaver`，将解析后的 `session_id` 映射为 LangGraph `thread_id`。
+   - 使用 `InMemorySaver`，将解析后的 `session_id` 映射为 LangGraph `thread_id`，并通过 `graph.compile(checkpointer=checkpointer)` 启用 checkpoint。
+   - API 每次只提交当前 `TripPlanRequest`；同一 `thread_id` 的 `working_messages` 和 `tool_observations` 从 checkpoint 恢复。
    - 实现 `append_working_message` 和 `append_tool_observation` 这类状态更新 helper。
    - working memory 超过 50 条消息时触发 overflow policy，保留最新 50 条。
    - 保持 working memory 只服务当前进程和当前 session，不提前承诺持久化。

@@ -11,6 +11,7 @@ from app.schemas.graph import NormalizedTripRequest, TravelPlanState
 from app.schemas.trip import TripPlan
 from app.services.amap_service import build_map_points
 from app.services.llm_service import validate_structured_output
+from app.agents.working_memory import append_tool_observation, append_working_message
 
 
 MAX_REPAIR_ATTEMPTS = 2
@@ -18,32 +19,29 @@ MAX_REPAIR_ATTEMPTS = 2
 
 async def initialize_working_state(state: TravelPlanState) -> dict[str, Any]:
     request = state["request"]
-    return {
-        "working_messages": state.get(
-            "working_messages",
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Plan a trip to {', '.join(request.cities)} "
-                        f"from {request.start_date} to {request.end_date}."
-                    ),
-                }
-            ],
+    working_message = {
+        "role": "user",
+        "content": (
+            f"Plan a trip to {', '.join(request.cities)} "
+            f"from {request.start_date} to {request.end_date}. "
+            f"Extra requirements: {request.extra_requirements or '(none)'}"
         ),
-        "trip_draft": state.get("trip_draft", {}),
-        "tool_observations": state.get("tool_observations", []),
+    }
+    return {
+        "working_messages": append_working_message(state.get("working_messages"), working_message),
+        "trip_draft": {},
+        "tool_observations": state.get("tool_observations", [])[-50:],
         "memory_candidates": state.get("memory_candidates", []),
         "semantic_memories": state.get("semantic_memories", []),
         "episodic_memories": state.get("episodic_memories", []),
-        "context_packets": state.get("context_packets", []),
-        "planner_context": state.get("planner_context", ""),
-        "attractions": state.get("attractions", []),
-        "weather_info": state.get("weather_info", []),
-        "hotels": state.get("hotels", []),
-        "trip_plan": state.get("trip_plan"),
-        "validation_errors": state.get("validation_errors", []),
-        "retry_count": state.get("retry_count", 0),
+        "context_packets": [],
+        "planner_context": "",
+        "attractions": [],
+        "weather_info": [],
+        "hotels": [],
+        "trip_plan": None,
+        "validation_errors": [],
+        "retry_count": 0,
     }
 
 
@@ -87,11 +85,17 @@ def make_weather_query_node(amap_client: Any | None = None):
             try:
                 city_weather = await amap_client.get_weather(city)
             except Exception as exc:
-                observations.append(f"Amap weather query for {city} failed: {type(exc).__name__}.")
+                observations = append_tool_observation(
+                    observations,
+                    f"Amap weather query for {city} failed: {type(exc).__name__}.",
+                )
                 continue
 
             weather_info.extend(city_weather)
-            observations.append(f"Amap weather query for {city} returned {len(city_weather)} records.")
+            observations = append_tool_observation(
+                observations,
+                f"Amap weather query for {city} returned {len(city_weather)} records.",
+            )
 
         return {
             "weather_info": weather_info,
@@ -108,7 +112,10 @@ def make_planner_node(llm_service: Any | None = None):
                 return {"trip_plan": await _generate_llm_trip_plan(state, llm_service)}
             except Exception as exc:
                 observations = list(state.get("tool_observations", []))
-                observations.append(f"Planner LLM failed; used deterministic fallback. {exception_details(exc)}")
+                observations = append_tool_observation(
+                    observations,
+                    f"Planner LLM failed; used deterministic fallback. {exception_details(exc)}",
+                )
                 fallback = _build_deterministic_trip_plan(state)
                 return {
                     "trip_plan": fallback,
@@ -283,7 +290,7 @@ async def validate_trip_plan(state: TravelPlanState) -> dict[str, Any]:
         trip_plan = TripPlan.model_validate(state["trip_plan"])
     except Exception as exc:
         errors = [f"TripPlan schema validation failed: {type(exc).__name__}."]
-        observations.append(f"Validation failed: {'; '.join(errors)}")
+        observations = append_tool_observation(observations, f"Validation failed: {'; '.join(errors)}")
         return {
             "validation_errors": errors,
             "retry_count": state.get("retry_count", 0) + 1,
@@ -292,7 +299,7 @@ async def validate_trip_plan(state: TravelPlanState) -> dict[str, Any]:
 
     errors = _business_validation_errors(trip_plan, state)
     if errors:
-        observations.append(f"Validation failed: {'; '.join(errors)}")
+        observations = append_tool_observation(observations, f"Validation failed: {'; '.join(errors)}")
         return {
             "trip_plan": trip_plan,
             "validation_errors": errors,
@@ -316,7 +323,7 @@ def route_after_validation(state: TravelPlanState) -> str:
 
 async def fallback_node(state: TravelPlanState) -> dict[str, Any]:
     observations = list(state.get("tool_observations", []))
-    observations.append("FallbackNode returned deterministic plan after repair limit.")
+    observations = append_tool_observation(observations, "FallbackNode returned deterministic plan after repair limit.")
     return {
         "trip_plan": _build_deterministic_trip_plan(state),
         "tool_observations": observations,
