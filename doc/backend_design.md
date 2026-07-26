@@ -99,8 +99,8 @@ The store uses:
 
 - Postgres
 - `pgvector`
-- local vLLM OpenAI-compatible embeddings API
-- `BAAI/bge-m3`
+- local Ollama embedding API for the MVP
+- `bge-m3:567m` / `BAAI/bge-m3`
 - 1024-dimensional vectors
 
 The backend should interact with long-term memory through LangGraph Store APIs, not raw SQL.
@@ -133,6 +133,7 @@ app/
     extraction.py
   services/
     amap_service.py
+    embedding_service.py
     llm_service.py
 ```
 
@@ -154,7 +155,7 @@ FastAPI app
 LangGraph compiled graph
 InMemorySaver checkpointer
 PostgresStore
-Embedding client pointing to vLLM /v1/embeddings
+EmbeddingService pointing to Ollama /api/embed
 Amap/weather tool clients
 LLM client for PlannerNode and extraction tasks
 ```
@@ -165,15 +166,16 @@ Expected environment variables:
 
 ```text
 APP_ENV=local
+MEMORY_ENABLED=true
 POSTGRES_URL=postgresql://...
 
 LLM_BASE_URL=...
 LLM_API_KEY=...
 LLM_MODEL_ID=gemini-3.1-flash-lite
 
-EMBEDDING_BASE_URL=http://localhost:8000/v1
-EMBEDDING_API_KEY=local-dev-key
-EMBEDDING_MODEL=BAAI/bge-m3
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_BASE_URL=http://localhost:11434
+EMBEDDING_MODEL=bge-m3:567m
 EMBEDDING_DIMS=1024
 
 AMAP_MAPS_API_KEY=...
@@ -181,7 +183,7 @@ AMAP_MCP_COMMAND=amap-mcp-server
 AMAP_MCP_ARGS=
 ```
 
-The embedding endpoint should be OpenAI-compatible and served locally by vLLM.
+The MVP embedding endpoint is Ollama `/api/embed`; `EmbeddingService` also keeps an OpenAI-compatible path for future vLLM deployment.
 
 ## Application Lifecycle
 
@@ -554,5 +556,5 @@ Not part of the backend MVP:
 
 The backend is an async FastAPI service that wraps the LangGraph travel planner.
 
-The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Memory extraction currently produces semantic and episodic candidates from overflow and final valid plans; durable long-term memory will use `PostgresStore` with `pgvector` and `BAAI/bge-m3` embeddings in the next step. The MVP exposes one real planning endpoint, one reserved recalculation endpoint, health checks, and optional memory-inspection endpoints for terminal testing.
+The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Memory extraction produces semantic and episodic candidates from overflow and final valid plans; when `MEMORY_ENABLED=true`, `LoadMemoryNode` and `SaveMemoryNode` use LangGraph `PostgresStore` with Postgres/pgvector and local `bge-m3` embeddings for durable recall. The current MVP exposes `GET /health` and `POST /api/trip/plan`; memory inspection and recalculation endpoints remain later steps.
 

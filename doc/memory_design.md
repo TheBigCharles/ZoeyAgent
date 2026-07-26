@@ -9,7 +9,7 @@ Target architecture:
 - Python web app
 - LangGraph agents workflow
 - Postgres-backed long-term memory
-- Local OpenAI-compatible embedding API served by vLLM with `BAAI/bge-m3`
+- Local embedding API served by Ollama with `bge-m3:567m` for the MVP; OpenAI-compatible/vLLM embeddings remain a supported adapter shape.
 
 ## Background
 
@@ -40,7 +40,7 @@ Do not implement perceptual memory for the MVP.
 The memory layer supports the agents workflow, especially these LangGraph nodes:
 
 - `LoadMemoryNode`: retrieves relevant semantic and episodic memories before planning.
-- `SaveMemoryNode`: extracts useful long-term memory candidates after a successful plan; durable writes are added in the long-term memory step.
+- `SaveMemoryNode`: extracts useful long-term memory candidates after a successful plan and writes approved candidates to long-term memory when memory is enabled.
 
 ## Scope
 
@@ -210,15 +210,18 @@ The application should interact with memory through LangGraph Store APIs such as
 
 ## Embedding Model
 
-Use `BAAI/bge-m3` served locally through vLLM's OpenAI-compatible embeddings API.
+Use `BAAI/bge-m3` through the local embedding provider. The MVP provider is Ollama with model name `bge-m3:567m`.
 
 Recommended settings:
 
-- Model: `BAAI/bge-m3`
-- Serving layer: vLLM
-- API style: OpenAI-compatible `/v1/embeddings`
+- Provider: `ollama`
+- Base URL: `http://localhost:11434`
+- Model: `bge-m3:567m`
+- API style: Ollama `/api/embed`
 - Vector dimension: `1024`
 - Embedded field: `text`
+
+The project `EmbeddingService` also keeps an OpenAI-compatible/vLLM path for later deployment by switching `EMBEDDING_PROVIDER`.
 
 The same embedding model must be used for both writes and searches. If the embedding model changes later, semantic and episodic memories should be re-embedded and the index rebuilt.
 
@@ -233,7 +236,7 @@ When `SaveMemoryNode` decides to persist a memory:
 1. It creates a memory item with a clear `text` field.
 2. It calls `PostgresStore.put(namespace, key, value)`.
 3. `PostgresStore` extracts the configured embedded field, currently `text`.
-4. The `text` value is sent to the local vLLM embedding API.
+4. The `text` value is sent to the configured local embedding API.
 5. `BAAI/bge-m3` returns a 1024-dimensional embedding vector.
 6. `PostgresStore` stores the JSON memory value and updates the Postgres `pgvector` index.
 
@@ -271,7 +274,7 @@ store.put(
 When `LoadMemoryNode` needs relevant memories:
 
 1. It calls `PostgresStore.search(namespace, query=..., limit=...)`.
-2. `PostgresStore` sends the natural-language query to the same vLLM embedding API.
+2. `PostgresStore` sends the natural-language query to the same configured embedding API.
 3. `BAAI/bge-m3` returns a 1024-dimensional query vector.
 4. Postgres performs `pgvector` similarity search against the indexed memory vectors.
 5. The closest semantic or episodic memories are returned.
@@ -313,7 +316,7 @@ flowchart TD
 
 `LoadMemoryNode` runs before planning. It searches semantic and episodic memory using the user's request.
 
-`SaveMemoryNode` runs after successful plan validation. In the extraction step, it extracts memory candidates from the current session, classifies them as semantic memory, episodic memory, or discard, deduplicates against existing candidates, and keeps approved candidates in graph state. In the long-term memory step, it is extended to write useful semantic and episodic memories to the right namespace.
+`SaveMemoryNode` runs after successful plan validation. It extracts memory candidates from the current session, classifies them as semantic memory, episodic memory, or discard, deduplicates against existing candidates, keeps approved candidates in graph state, and writes useful semantic and episodic memories to the right `PostgresStore` namespace when long-term memory is enabled.
 
 ## Working Memory Extraction
 
@@ -327,7 +330,8 @@ Responsibilities:
 - Extract memory candidates.
 - Classify each candidate as semantic memory, episodic memory, or discard.
 - Deduplicate candidates against existing memories.
-- Return approved candidates for the current graph state. Durable writes to `PostgresStore` belong to the long-term memory step.
+- Return approved candidates for the current graph state.
+- Let `SaveMemoryNode` write approved semantic/episodic candidates to `PostgresStore` after validation succeeds.
 
 Candidate shape:
 
@@ -416,7 +420,7 @@ Discard:
    - Concrete confirmed/rejected/modified decision -> episodic memory
    - Temporary or duplicate detail -> discard
 8. Keep extracted candidates in graph state for the current step.
-9. In the long-term memory step, write approved semantic/episodic memories to `PostgresStore`.
+9. After validation succeeds, write approved semantic/episodic memories to `PostgresStore` when long-term memory is enabled.
 10. Return the response.
 
 ## Promotion Rules
@@ -452,7 +456,7 @@ In the agents workflow:
 
 - `LoadMemoryNode` retrieves semantic and episodic memories.
 - `PlannerNode` uses those memories to personalize the itinerary.
-- `SaveMemoryNode` extracts important preferences and decisions as memory candidates; durable writes are handled by the long-term memory step.
+- `SaveMemoryNode` extracts important preferences and decisions as memory candidates and writes approved semantic/episodic memories to `PostgresStore` when long-term memory is enabled.
 
 Working memory stays inside the active graph state and is discarded when the session ends, except for information promoted into long-term memory.
 

@@ -35,8 +35,12 @@ class Settings(BaseSettings):
 
     embedding_base_url: str = Field(default="http://localhost:8000/v1", alias="EMBEDDING_BASE_URL")
     embedding_api_key: str = Field(default="local-dev-key", alias="EMBEDDING_API_KEY")
-    embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
+    embedding_model: str = Field(default="bge-m3:567m", alias="EMBEDDING_MODEL")
     embedding_dims: int = Field(default=1024, alias="EMBEDDING_DIMS")
+    embedding_provider: str = Field(default="ollama", alias="EMBEDDING_PROVIDER")
+
+    memory_enabled: bool = Field(default=False, alias="MEMORY_ENABLED")
+    memory_search_limit: int = Field(default=5, alias="MEMORY_SEARCH_LIMIT")
 
     amap_api_key: str | None = Field(default=None, alias="AMAP_MAPS_API_KEY")
     amap_mcp_command: str = Field(default="amap-mcp-server", alias="AMAP_MCP_COMMAND")
@@ -86,14 +90,19 @@ class AppDependencies:
     store: Any | None = None
     amap_client: Any | None = None
     llm_client: Any | None = None
+    embedding_client: Any | None = None
 
     async def start(self) -> None:
+        if self.store is not None and hasattr(self.store, "start"):
+            await self.store.start()
         if self.amap_client is not None:
             await self.amap_client.start()
 
     async def close(self) -> None:
         if self.amap_client is not None:
             await self.amap_client.close()
+        if self.store is not None and hasattr(self.store, "close"):
+            await self.store.close()
 
 
 DependencyFactory = Callable[[], Awaitable[AppDependencies]]
@@ -101,12 +110,24 @@ DependencyFactory = Callable[[], Awaitable[AppDependencies]]
 
 async def create_app_dependencies() -> AppDependencies:
     from app.agents.trip_planner_agent import build_travel_planner_graph
+    from app.memory.store import LongTermMemoryStore
     from app.services.amap_service import AmapMCPService
+    from app.services.embedding_service import EmbeddingService
     from app.services.llm_service import LLMService
 
     settings = get_settings()
     amap_client = AmapMCPService(settings=settings)
     llm_client = LLMService(settings=settings)
+    embedding_client = EmbeddingService(settings=settings) if settings.memory_enabled else None
+    store = (
+        LongTermMemoryStore(
+            settings=settings,
+            embedding_service=embedding_client,
+            search_limit=settings.memory_search_limit,
+        )
+        if settings.memory_enabled
+        else None
+    )
     checkpointer = InMemorySaver()
     return AppDependencies(
         settings=settings,
@@ -114,11 +135,13 @@ async def create_app_dependencies() -> AppDependencies:
             amap_client=amap_client,
             llm_service=llm_client,
             checkpointer=checkpointer,
+            long_term_store=store,
         ),
         checkpointer=checkpointer,
-        store=None,
+        store=store,
         amap_client=amap_client,
         llm_client=llm_client,
+        embedding_client=embedding_client,
     )
 
 

@@ -35,12 +35,14 @@ AMAP_MCP_COMMAND=../../../../Users/awateryMan/anaconda3/envs/zoey_agent/Scripts/
 
 HTTP 输入里 `TripPlanRequest.cities` 应传中文城市名，例如 `["北京"]`。当前 Amap MCP 的 POI 搜索对英文城市名不稳定，`["Beijing"]` 可能召回北京以外的 POI；前端展示语言可以自行决定，但传给后端的城市字段应使用高德可稳定识别的中文城市名。
 
+如需启用长期记忆，先启动 Docker Postgres/pgvector 和 Ollama，并在 `backend/.env` 配置 `MEMORY_ENABLED=true`、`POSTGRES_URL=postgresql://zoey:zoey@127.0.0.1:5432/zoey_agent`、`EMBEDDING_PROVIDER=ollama`、`EMBEDDING_BASE_URL=http://localhost:11434`、`EMBEDDING_MODEL=bge-m3:567m`、`EMBEDDING_DIMS=1024`。
+
 ## 总体架构
 
 ```mermaid
 flowchart TB
     client["客户端或终端测试"] --> fastapi["FastAPI 应用<br/>承接外部请求"]
-    fastapi --> api["API routes<br/>隔离 HTTP 边界<br/>GET /health<br/>POST /api/trip/plan<br/>memory debug"]
+    fastapi --> api["API routes<br/>隔离 HTTP 边界<br/>GET /health<br/>POST /api/trip/plan"]
     api --> requestContract["TripPlanRequest<br/>保证输入合法<br/>Pydantic validation"]
     requestContract --> sessionResolver["SessionResolver<br/>保证同一次规划可续接<br/>resolve session_id as thread_id"]
     sessionResolver --> initialState["TravelPlanState<br/>创建 graph 输入状态"]
@@ -82,7 +84,7 @@ flowchart TB
         longTerm["Long-term memory (Store)<br/>跨会话复用记忆<br/>PostgresStore"]
         semanticStore["Semantic memory<br/>保存稳定偏好"]
         episodicStore["Episodic memory<br/>保存历史决策"]
-        embeddings["Embeddings<br/>让记忆可语义检索<br/>BAAI/bge-m3"]
+        embeddings["Embeddings<br/>让记忆可语义检索<br/>Ollama bge-m3"]
         llmService["LLMService<br/>统一模型调用入口<br/>OpenAI compatible"]
         attractionBridge --> amapClient
         amapClient --> amapServer
@@ -274,6 +276,8 @@ flowchart TB
 - Semantic memory：保存稳定偏好或事实；例如“用户偏好轻松节奏”。
 - Episodic memory：保存具体历史决策或事件；例如“用户上次拒绝了离景点太远的酒店”。
 - `MemoryExtractionService`：从 working memory overflow 或最终有效行程中抽取候选记忆，并分类为 semantic、episodic 或 discard。
+- `LongTermMemoryStore`：通过 LangGraph `PostgresStore` 保存和召回 semantic/episodic memory；例如按 `user_id` 搜索“轻松历史文化行程”相关记忆。
+- `EmbeddingService`：封装本地 embedding 调用，当前用 Ollama `bge-m3:567m` 把 memory text 转成 1024 维向量。
 
 **上下文和模型调用**
 
@@ -295,7 +299,7 @@ flowchart TB
 - `HotelSearchSubgraph`：LLM ReAct 风格的酒店搜索子图，基于景点位置、预算、交通方式和住宿偏好搜索酒店候选，不确认真实房态。
 - `PlannerNode`：使用 planner context 生成可渲染的 `TripPlan` 草稿。
 - `ValidateTripPlanNode`：校验 `TripPlan` 是否满足 day-centric 合同，例如日期数量、day index、价格和 map points；餐食规划暂时不作为强校验条件。
-- `SaveMemoryNode`：只在 `TripPlan` 校验成功后抽取长期记忆候选，避免从无效计划生成 memory；真正写入长期 store 留到 Step 17。
+- `SaveMemoryNode`：只在 `TripPlan` 校验成功后抽取长期记忆候选，并在长期记忆开启时写入 `PostgresStore`，避免从无效计划生成 memory。
 - `FallbackNode`：在多次 repair 失败后返回保守可控的结果或结构化错误，避免 graph 无限重试。
 - `TripPlan`：最终返回给前端直接渲染的响应模型，包含 resolved `session_id`、每日行程、天气和整体建议。
 
@@ -442,11 +446,12 @@ flowchart TB
    - 验证方式：用固定 working messages、overflow items 和 final `TripPlan` 测试分类、discard、dedup 和 dropped_count。
 
 17. 接入长期记忆
-   - 配置 Postgres、pgvector、LangGraph `PostgresStore` 和本地 vLLM embedding endpoint。
-   - 实现 `LoadMemoryNode` 搜索 semantic 和 episodic memories。
+   - 配置 Postgres、pgvector、LangGraph `PostgresStore` 和本地 embedding endpoint；MVP 使用 Ollama `bge-m3:567m`，并保留 OpenAI-compatible/vLLM 入口。
+   - 实现 `EmbeddingService` 和 `LongTermMemoryStore`，让 `PostgresStore` 对 `text` 字段建立 embedding index。
+   - 实现 `LoadMemoryNode`，在规划前按 `user_id` 搜索 semantic 和 episodic memories 并写入 `TravelPlanState`。
    - 扩展 `SaveMemoryNode`，只在 `TripPlan` 验证成功后把 `MemoryExtractionService` 产出的候选写入长期记忆。
-   - 本地未配置 Postgres 时应允许关闭长期记忆，避免开发流程被基础设施阻塞。
-   - 验证方式：分别测试 memory disabled、测试 store、真实 PostgresStore 三种路径。
+   - 本地未配置 Postgres 时可通过 `MEMORY_ENABLED=false` 关闭长期记忆，避免开发流程被基础设施阻塞。
+   - 验证方式：分别测试 memory disabled、测试 store wrapper、真实 PostgresStore + pgvector + Ollama 三种路径。
 
 18. 增加 memory 调试接口
    - 实现 `GET /api/memory/semantic` 和 `GET /api/memory/episodic`。

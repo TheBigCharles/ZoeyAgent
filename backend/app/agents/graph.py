@@ -10,11 +10,12 @@ from app.agents.hotel_search import make_hotel_search_node
 from app.agents.nodes import (
     fallback_node,
     initialize_working_state,
+    make_load_memory_node,
     make_planner_node,
+    make_save_memory_node,
     make_weather_query_node,
     normalize_request,
     route_after_validation,
-    save_memory_node,
     validate_trip_plan,
 )
 from app.schemas.graph import TravelPlanState
@@ -25,10 +26,11 @@ def build_initial_state(request: TripPlanRequest) -> TravelPlanState:
     return {"request": request}
 
 
-def build_travel_planner_graph(amap_client=None, llm_service=None, checkpointer=None):
+def build_travel_planner_graph(amap_client=None, llm_service=None, checkpointer=None, long_term_store=None):
     """Build and compile the minimal async TravelPlannerGraph."""
     graph = StateGraph(TravelPlanState)
     graph.add_node("InitializeWorkingState", initialize_working_state)
+    graph.add_node("LoadMemoryNode", make_load_memory_node(long_term_store))
     graph.add_node("NormalizeRequestNode", normalize_request)
     graph.add_node("AttractionSearchSubgraph", make_attraction_search_node(amap_client, llm_service))
     graph.add_node("HotelSearchSubgraph", make_hotel_search_node(amap_client, llm_service))
@@ -36,11 +38,12 @@ def build_travel_planner_graph(amap_client=None, llm_service=None, checkpointer=
     graph.add_node("ContextAssemblyNode", assemble_planner_context)
     graph.add_node("PlannerNode", make_planner_node(llm_service))
     graph.add_node("ValidateTripPlanNode", validate_trip_plan)
-    graph.add_node("SaveMemoryNode", save_memory_node)
+    graph.add_node("SaveMemoryNode", make_save_memory_node(long_term_store))
     graph.add_node("FallbackNode", fallback_node)
 
     graph.add_edge(START, "InitializeWorkingState")
-    graph.add_edge("InitializeWorkingState", "NormalizeRequestNode")
+    graph.add_edge("InitializeWorkingState", "LoadMemoryNode")
+    graph.add_edge("LoadMemoryNode", "NormalizeRequestNode")
     graph.add_edge("NormalizeRequestNode", "AttractionSearchSubgraph")
     graph.add_edge("AttractionSearchSubgraph", "HotelSearchSubgraph")
     graph.add_edge("HotelSearchSubgraph", "WeatherQueryNode")

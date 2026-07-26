@@ -66,6 +66,51 @@ async def initialize_working_state(state: TravelPlanState) -> dict[str, Any]:
     }
 
 
+def make_load_memory_node(long_term_store: Any | None = None):
+    async def load_memory_node(state: TravelPlanState) -> dict[str, Any]:
+        semantic_memories = list(state.get("semantic_memories", []))
+        episodic_memories = list(state.get("episodic_memories", []))
+        observations = list(state.get("tool_observations", []))
+        memory_candidates = list(state.get("memory_candidates", []))
+
+        if long_term_store is None:
+            return {
+                "semantic_memories": semantic_memories,
+                "episodic_memories": episodic_memories,
+                "tool_observations": observations,
+                "memory_candidates": memory_candidates,
+            }
+
+        request = state["request"]
+        query = _memory_recall_query(request)
+        try:
+            semantic_memories = await long_term_store.search_semantic(request.user_id, query, limit=None)
+            episodic_memories = await long_term_store.search_episodic(request.user_id, query, limit=None)
+            observations, memory_candidates = _maintain_tool_observation(
+                observations,
+                (
+                    "Long-term memory loaded "
+                    f"{len(semantic_memories)} semantic and {len(episodic_memories)} episodic records."
+                ),
+                memory_candidates,
+            )
+        except Exception as exc:
+            observations, memory_candidates = _maintain_tool_observation(
+                observations,
+                f"Long-term memory load failed: {type(exc).__name__}.",
+                memory_candidates,
+            )
+
+        return {
+            "semantic_memories": semantic_memories,
+            "episodic_memories": episodic_memories,
+            "tool_observations": observations,
+            "memory_candidates": memory_candidates,
+        }
+
+    return load_memory_node
+
+
 async def normalize_request(state: TravelPlanState) -> dict[str, NormalizedTripRequest]:
     request = state["request"]
     days_count = (request.end_date - request.start_date).days + 1
@@ -375,6 +420,46 @@ async def fallback_node(state: TravelPlanState) -> dict[str, Any]:
 
 
 async def save_memory_node(state: TravelPlanState) -> dict[str, Any]:
+    return await make_save_memory_node()(state)
+
+
+def make_save_memory_node(long_term_store: Any | None = None):
+    async def node(state: TravelPlanState) -> dict[str, Any]:
+        trip_plan = TripPlan.model_validate(state["trip_plan"])
+        existing_candidates = list(state.get("memory_candidates", []))
+        extracted = MemoryExtractionService().extract_from_final_plan(
+            trip_plan=trip_plan,
+            working_messages=state.get("working_messages", []),
+            tool_observations=state.get("tool_observations", []),
+            existing_candidates=existing_candidates,
+        )
+        memory_candidates = merge_memory_candidates(existing_candidates, extracted)
+        observations = list(state.get("tool_observations", []))
+
+        if long_term_store is not None:
+            try:
+                saved_count = await long_term_store.save_candidates(state["request"].user_id, memory_candidates)
+                observations, memory_candidates = _maintain_tool_observation(
+                    observations,
+                    f"Long-term memory saved {saved_count} records.",
+                    memory_candidates,
+                )
+            except Exception as exc:
+                observations, memory_candidates = _maintain_tool_observation(
+                    observations,
+                    f"Long-term memory save failed: {type(exc).__name__}.",
+                    memory_candidates,
+                )
+
+        return {
+            "memory_candidates": memory_candidates,
+            "tool_observations": observations,
+        }
+
+    return node
+
+
+async def _legacy_save_memory_node(state: TravelPlanState) -> dict[str, Any]:
     trip_plan = TripPlan.model_validate(state["trip_plan"])
     existing_candidates = list(state.get("memory_candidates", []))
     extracted = MemoryExtractionService().extract_from_final_plan(
@@ -415,6 +500,27 @@ def _business_validation_errors(trip_plan: TripPlan, state: TravelPlanState) -> 
             errors.append(f"days[{expected_index}].map_points must include anchors for located entities")
 
     return errors
+
+
+def _memory_recall_query(request: Any) -> str:
+    preferences = request.preferences
+    return " ".join(
+        [
+            request.user_id,
+            " ".join(request.cities),
+            request.start_date.isoformat(),
+            request.end_date.isoformat(),
+            "transport",
+            preferences.transport_preference.value_en,
+            "accommodation",
+            " ".join(preference.value_en for preference in preferences.accommodation_preference),
+            "attractions",
+            " ".join(preference.value_en for preference in preferences.attraction_preference),
+            "budget",
+            str(request.budget or ""),
+            request.extra_requirements or "",
+        ]
+    )
 
 
 def _has_located_entities(day: DayPlan) -> bool:

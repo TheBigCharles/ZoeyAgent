@@ -174,7 +174,7 @@ Responsibilities:
 - Retrieve long-term travel preferences from semantic memory.
 - Retrieve related historical travel decisions from episodic memory.
 - Provide context such as preferred travel pace, hotel preferences, rejected options, and previously confirmed choices.
-- Use `PostgresStore.search(...)` for semantic recall over long-term memory. The store embeds the query with `BAAI/bge-m3` through the local vLLM embedding API and performs `pgvector` similarity search in Postgres.
+- Use `PostgresStore.search(...)` for semantic recall over long-term memory. The store embeds the query with `bge-m3` through the configured local embedding API; the MVP uses Ollama `/api/embed` and Postgres `pgvector`.
 
 ### NormalizeRequestNode
 
@@ -215,7 +215,7 @@ Output:
 
 - Updated `working_messages`
 - Optional `memory_candidates`
-- Optional semantic/episodic memory writes through `MemoryExtractionService`
+- Optional semantic/episodic memory candidates through `MemoryExtractionService`
 
 Responsibilities:
 
@@ -223,7 +223,7 @@ Responsibilities:
 - In implementation, enforce the same policy through state-update helpers such as `maintain_working_messages(...)` and `maintain_tool_observations(...)`.
 - If `working_messages` exceeds 50 messages, take the oldest overflow messages.
 - Use `MemoryExtractionService` to extract semantic/episodic candidates from the overflow messages.
-- Deduplicate and write approved long-term candidates to `PostgresStore`.
+- Deduplicate approved long-term candidates into `memory_candidates`; durable writes are handled by `SaveMemoryNode` after a valid plan.
 - Remove overflow messages from `working_messages` after extraction.
 
 This node does not summarize working memory and does not search working memory with BM25, TF-IDF, embeddings, or `pgvector`. Working memory remains checkpointed graph state loaded by `thread_id`.
@@ -236,7 +236,7 @@ maintain_working_messages(state, message)
   -> if len(working_messages) > 50:
        overflow = oldest messages beyond the 50-message limit
        MemoryExtractionService extracts semantic/episodic candidates
-       approved candidates are written to PostgresStore
+       approved candidates are kept in memory_candidates
        working_messages keeps only the latest 50 messages
 ```
 
@@ -778,7 +778,7 @@ Responsibilities:
 - Save stable user preferences and reusable facts to semantic memory.
 - Save confirmed, rejected, or modified travel decisions to episodic memory.
 - Deduplicate against existing long-term memories before writing.
-- Use `PostgresStore.put(...)` for long-term memory writes. The store indexes the configured `text` field with Postgres `pgvector` by embedding it with `BAAI/bge-m3` through the local vLLM embedding API.
+- Use `PostgresStore.put(...)` for long-term memory writes. The store indexes the configured `text` field with Postgres `pgvector` by embedding it with local `bge-m3`; the MVP provider is Ollama.
 - Avoid saving transient working memory unless it has long-term value.
 
 Implementation note:

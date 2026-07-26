@@ -512,6 +512,79 @@ def test_travel_planner_graph_extracts_memory_candidates_after_valid_trip_plan()
     assert any(candidate.target == "episodic" for candidate in result["memory_candidates"])
 
 
+def test_travel_planner_graph_loads_long_term_memory_before_planning() -> None:
+    class FakeLongTermMemoryStore:
+        def __init__(self) -> None:
+            self.semantic_queries: list[str] = []
+            self.episodic_queries: list[str] = []
+
+        async def search_semantic(self, user_id: str, query: str, limit: int | None = None) -> list[dict]:
+            self.semantic_queries.append(f"{user_id}:{query}:{limit}")
+            return [{"text": "User prefers relaxed travel.", "target": "semantic"}]
+
+        async def search_episodic(self, user_id: str, query: str, limit: int | None = None) -> list[dict]:
+            self.episodic_queries.append(f"{user_id}:{query}:{limit}")
+            return [{"text": "User previously selected a city-center hotel.", "target": "episodic"}]
+
+        async def save_candidates(self, user_id: str, candidates: list) -> int:
+            return 0
+
+    async def run_graph() -> tuple[TravelPlanState, FakeLongTermMemoryStore]:
+        store = FakeLongTermMemoryStore()
+        graph = build_travel_planner_graph(long_term_store=store)
+        request = make_request()
+        result = await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+        return result, store
+
+    result, store = asyncio.run(run_graph())
+
+    assert store.semantic_queries
+    assert "Beijing" in store.semantic_queries[0]
+    assert result["semantic_memories"] == [{"text": "User prefers relaxed travel.", "target": "semantic"}]
+    assert result["episodic_memories"] == [
+        {"text": "User previously selected a city-center hotel.", "target": "episodic"}
+    ]
+    assert "Known User Preferences" in result["planner_context"]
+    assert "User prefers relaxed travel." in result["planner_context"]
+
+
+def test_travel_planner_graph_saves_long_term_memory_after_valid_trip_plan() -> None:
+    class FakeLongTermMemoryStore:
+        def __init__(self) -> None:
+            self.saved: list[tuple[str, list]] = []
+
+        async def search_semantic(self, user_id: str, query: str, limit: int | None = None) -> list[dict]:
+            return []
+
+        async def search_episodic(self, user_id: str, query: str, limit: int | None = None) -> list[dict]:
+            return []
+
+        async def save_candidates(self, user_id: str, candidates: list) -> int:
+            self.saved.append((user_id, list(candidates)))
+            return len([candidate for candidate in candidates if candidate.target != "discard"])
+
+    async def run_graph() -> tuple[TravelPlanState, FakeLongTermMemoryStore]:
+        store = FakeLongTermMemoryStore()
+        graph = build_travel_planner_graph(long_term_store=store)
+        request = make_request().model_copy(update={"extra_requirements": "Prefer relaxed cultural attractions."})
+        result = await graph.ainvoke(
+            {"request": request},
+            config={"configurable": {"thread_id": request.session_id}},
+        )
+        return result, store
+
+    result, store = asyncio.run(run_graph())
+
+    assert store.saved
+    assert store.saved[0][0] == "user-001"
+    assert any(candidate.target == "semantic" for candidate in store.saved[0][1])
+    assert any(candidate.target == "episodic" for candidate in store.saved[0][1])
+    assert any("Long-term memory saved" in observation for observation in result["tool_observations"])
+
+
 def test_weather_node_extracts_memory_candidates_when_tool_observations_overflow() -> None:
     class WeatherClient:
         async def get_weather(self, city: str) -> list[WeatherInfo]:
