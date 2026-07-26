@@ -1,0 +1,13 @@
+{
+  "user_id": "e2e-user-public",
+  "cities": ["北京"],
+  "start_date": "2026-06-20",
+  "end_date": "2026-06-20",
+  "preferences": {
+    "transport_preference": 0,
+    "accommodation_preference": [0],
+    "attraction_preference": [0]
+  },
+  "budget": 1200,
+  "extra_requirements": "中文输出；一天轻松行程；优先历史文化景点。"
+}

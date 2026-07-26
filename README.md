@@ -44,6 +44,12 @@ curl.exe "http://127.0.0.1:8000/api/memory/semantic?user_id=browser-test-001&que
 curl.exe "http://127.0.0.1:8000/api/memory/episodic?user_id=browser-test-001&limit=5"
 ```
 
+端到端测试请求样例放在 `backend/tests/fixtures/http_requests/`，例如 `trip-request-beijing-public.json`、`trip-request-beijing-driving.json` 和 `trip-recalculate-request.json`。运行本地合同测试：
+
+```powershell
+C:\Users\awateryMan\anaconda3\envs\zoey_agent\python.exe -m pytest backend/tests/test_e2e_validation.py
+```
+
 ## 总体架构
 
 ```mermaid
@@ -474,7 +480,8 @@ flowchart TB
    - 验证方式：确认 endpoint 存在、返回明确的未实现响应，并不会影响 `/api/trip/plan`。
 
 20. 做端到端验证
-   - 用 `curl`、HTTP client 或 pytest 覆盖 health、trip planning、memory search。
+   - 在 `backend/tests/fixtures/http_requests/` 下保存可复用 JSON 请求样例，避免端到端验证依赖手工复制 payload。
+   - 用 pytest + FastAPI TestClient 覆盖 health、trip planning、memory search 和 reserved recalculate。
    - 测试单城市、多城市、公共交通、自驾、预算为空、工具失败、planner validation retry 等路径。
    - 每轮验证只修复当前发现的问题，不回退已经稳定的 API 合同。
 

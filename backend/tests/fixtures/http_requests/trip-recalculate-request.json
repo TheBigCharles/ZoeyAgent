@@ -1,0 +1,26 @@
+{
+  "user_id": "e2e-user-recalculate",
+  "session_id": "recalculate-session",
+  "trip_plan": {
+    "session_id": "recalculate-session",
+    "cities": ["北京"],
+    "start_date": "2026-06-20",
+    "end_date": "2026-06-20",
+    "days": [
+      {
+        "date": "2026-06-20",
+        "day_index": 0,
+        "city": "北京",
+        "description": "用户编辑前的一天行程。",
+        "transportation": "public_transport",
+        "accommodation": "budget_hotel",
+        "meals": [],
+        "map_points": [],
+        "total_price": 0
+      }
+    ],
+    "weather_info": [],
+    "overall_suggestions": "待重算的行程。"
+  },
+  "edit_reason": "用户删除了一个景点，需要后续重算路线和价格。"
+}

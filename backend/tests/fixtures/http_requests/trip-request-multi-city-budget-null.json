@@ -1,0 +1,13 @@
+{
+  "user_id": "e2e-user-multi-city",
+  "cities": ["北京", "上海"],
+  "start_date": "2026-06-22",
+  "end_date": "2026-06-23",
+  "preferences": {
+    "transport_preference": 0,
+    "accommodation_preference": [0, 1],
+    "attraction_preference": [0, 1]
+  },
+  "budget": null,
+  "extra_requirements": "中文输出；两城轻松行程；预算暂不确定。"
+}

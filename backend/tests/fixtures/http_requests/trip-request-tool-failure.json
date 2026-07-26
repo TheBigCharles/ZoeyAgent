@@ -1,0 +1,13 @@
+{
+  "user_id": "e2e-user-tool-failure",
+  "cities": ["北京"],
+  "start_date": "2026-06-24",
+  "end_date": "2026-06-24",
+  "preferences": {
+    "transport_preference": 0,
+    "accommodation_preference": [0],
+    "attraction_preference": [0]
+  },
+  "budget": 1000,
+  "extra_requirements": "中文输出；即使天气工具失败，也要返回可控行程。"
+}

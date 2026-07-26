@@ -1,0 +1,13 @@
+{
+  "user_id": "e2e-user-driving",
+  "cities": ["北京"],
+  "start_date": "2026-06-21",
+  "end_date": "2026-06-21",
+  "preferences": {
+    "transport_preference": 1,
+    "accommodation_preference": [1],
+    "attraction_preference": [0, 5]
+  },
+  "budget": 1800,
+  "extra_requirements": "中文输出；自驾；不要太赶；保留地图点。"
+}
