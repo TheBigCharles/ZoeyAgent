@@ -25,6 +25,29 @@ def minimal_trip_request() -> dict:
     }
 
 
+def minimal_trip_plan_payload() -> dict:
+    return {
+        "session_id": "existing-session-001",
+        "cities": ["Beijing"],
+        "start_date": "2026-06-10",
+        "end_date": "2026-06-10",
+        "days": [
+            {
+                "date": "2026-06-10",
+                "day_index": 0,
+                "city": "Beijing",
+                "description": "Existing editable day plan.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "meals": [],
+                "total_price": 0,
+            }
+        ],
+        "weather_info": [],
+        "overall_suggestions": "Existing plan.",
+    }
+
+
 async def controlled_graph_dependencies() -> AppDependencies:
     return AppDependencies(graph=build_travel_planner_graph())
 
@@ -137,3 +160,32 @@ def test_plan_endpoint_wraps_dependency_startup_errors_in_structured_error() -> 
             "details": {"exception_type": "RuntimeError"},
         }
     }
+
+
+def test_recalculate_endpoint_is_reserved_and_returns_structured_501() -> None:
+    payload = {
+        "user_id": "user-001",
+        "session_id": "existing-session-001",
+        "trip_plan": minimal_trip_plan_payload(),
+        "edit_reason": "User deleted an attraction.",
+    }
+
+    with TestClient(create_app(dependency_factory=controlled_graph_dependencies)) as client:
+        response = client.post("/api/trip/recalculate", json=payload)
+
+    assert response.status_code == 501
+    assert response.json() == {
+        "error": {
+            "code": "TRIP_RECALCULATION_NOT_IMPLEMENTED",
+            "message": "Trip recalculation is reserved but not implemented",
+            "details": {},
+        }
+    }
+
+
+def test_recalculate_route_does_not_change_plan_endpoint() -> None:
+    with TestClient(create_app(dependency_factory=controlled_graph_dependencies)) as client:
+        response = client.post("/api/trip/plan", json=minimal_trip_request())
+
+    assert response.status_code == 200
+    assert TripPlan.model_validate(response.json()).days

@@ -37,12 +37,19 @@ HTTP 输入里 `TripPlanRequest.cities` 应传中文城市名，例如 `["北京
 
 如需启用长期记忆，先启动 Docker Postgres/pgvector 和 Ollama，并在 `backend/.env` 配置 `MEMORY_ENABLED=true`、`POSTGRES_URL=postgresql://zoey:zoey@127.0.0.1:5432/zoey_agent`、`EMBEDDING_PROVIDER=ollama`、`EMBEDDING_BASE_URL=http://localhost:11434`、`EMBEDDING_MODEL=bge-m3:567m`、`EMBEDDING_DIMS=1024`。
 
+长期记忆调试接口示例：
+
+```powershell
+curl.exe "http://127.0.0.1:8000/api/memory/semantic?user_id=browser-test-001&query=轻松历史文化&limit=5"
+curl.exe "http://127.0.0.1:8000/api/memory/episodic?user_id=browser-test-001&limit=5"
+```
+
 ## 总体架构
 
 ```mermaid
 flowchart TB
     client["客户端或终端测试"] --> fastapi["FastAPI 应用<br/>承接外部请求"]
-    fastapi --> api["API routes<br/>隔离 HTTP 边界<br/>GET /health<br/>POST /api/trip/plan"]
+    fastapi --> api["API routes<br/>隔离 HTTP 边界<br/>GET /health<br/>POST /api/trip/plan<br/>GET /api/memory/*"]
     api --> requestContract["TripPlanRequest<br/>保证输入合法<br/>Pydantic validation"]
     requestContract --> sessionResolver["SessionResolver<br/>保证同一次规划可续接<br/>resolve session_id as thread_id"]
     sessionResolver --> initialState["TravelPlanState<br/>创建 graph 输入状态"]
@@ -456,12 +463,13 @@ flowchart TB
 18. 增加 memory 调试接口
    - 实现 `GET /api/memory/semantic` 和 `GET /api/memory/episodic`。
    - 用于本地开发、终端测试和记忆召回验证。
+   - 返回 `memory_type`、`user_id`、`query`、`limit`、`count` 和 `items`，便于终端直接检查召回结果。
    - 生产环境上线前应加鉴权或禁用。
    - 验证方式：在测试 store 和真实 store 下分别查询 semantic/episodic memory。
 
 19. 预留编辑和重算能力
    - 保留 `POST /api/trip/recalculate` 路由和 `TripRecalculateRequest`。
-   - MVP 可以返回 `501 Not Implemented`。
+   - MVP 当前返回结构化 `501 Not Implemented`，错误码为 `TRIP_RECALCULATION_NOT_IMPLEMENTED`。
    - 后续在不破坏 `TripPlan` 合同的前提下增加局部重排、删除景点、重新计算价格和路线 summary。
    - 验证方式：确认 endpoint 存在、返回明确的未实现响应，并不会影响 `/api/trip/plan`。
 

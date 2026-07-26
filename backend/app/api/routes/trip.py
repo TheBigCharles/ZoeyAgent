@@ -9,11 +9,12 @@ from app.config import (
     GRAPH_EXECUTION_FAILED,
     PLAN_VALIDATION_FAILED,
     StructuredAppError,
+    TRIP_RECALCULATION_NOT_IMPLEMENTED,
     exception_details,
     get_app_dependencies,
 )
 from app.agents.trip_planner_agent import build_initial_state
-from app.schemas.trip import TripPlan, TripPlanRequest
+from app.schemas.trip import TripPlan, TripPlanRequest, TripRecalculateRequest
 
 router = APIRouter(prefix="/api/trip", tags=["trip"])
 
@@ -47,3 +48,12 @@ async def create_trip_plan(
             message="Trip plan validation failed",
             details=exception_details(exc),
         ) from exc
+
+
+@router.post("/recalculate", response_model=TripPlan)
+async def recalculate_trip_plan(_: TripRecalculateRequest) -> TripPlan:
+    raise StructuredAppError(
+        code=TRIP_RECALCULATION_NOT_IMPLEMENTED,
+        message="Trip recalculation is reserved but not implemented",
+        status_code=501,
+    )

@@ -51,7 +51,7 @@ class LongTermMemoryStore:
     async def save_candidates(self, user_id: str, candidates: list[MemoryCandidate]) -> int:
         return await asyncio.to_thread(self._save_candidates_sync, user_id, candidates)
 
-    async def search_semantic(self, user_id: str, query: str, limit: int | None = None) -> list[dict[str, Any]]:
+    async def search_semantic(self, user_id: str, query: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
             self._search_sync,
             (user_id, SEMANTIC_NAMESPACE),
@@ -59,7 +59,7 @@ class LongTermMemoryStore:
             limit or self.search_limit,
         )
 
-    async def search_episodic(self, user_id: str, query: str, limit: int | None = None) -> list[dict[str, Any]]:
+    async def search_episodic(self, user_id: str, query: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
             self._search_sync,
             (user_id, EPISODIC_NAMESPACE),
@@ -91,7 +91,7 @@ class LongTermMemoryStore:
             saved_count += 1
         return saved_count
 
-    def _search_sync(self, namespace: tuple[str, str], query: str, limit: int) -> list[dict[str, Any]]:
+    def _search_sync(self, namespace: tuple[str, str], query: str | None, limit: int) -> list[dict[str, Any]]:
         store = self._require_store()
         items = store.search(namespace, query=query, limit=limit)
         return [_memory_from_item(item) for item in items]

@@ -289,7 +289,7 @@ POST /api/trip/recalculate
 
 Status:
 
-- Reserved for future implementation.
+- Route is reserved and implemented as a structured `501 Not Implemented` response.
 
 Signature:
 
@@ -301,7 +301,7 @@ async def recalculate_trip_plan(request: TripRecalculateRequest) -> TripPlan:
 
 For MVP:
 
-- The route may return `501 Not Implemented`.
+- The route returns structured `501 Not Implemented` with code `TRIP_RECALCULATION_NOT_IMPLEMENTED`.
 - The namespace and signature should be reserved.
 
 Future use:
@@ -334,6 +334,8 @@ Behavior:
 
 - If `query` is provided, call `PostgresStore.search((user_id, "semantic_memories"), query=query, limit=limit)`.
 - If `query` is absent, list recent memories if supported by store implementation.
+- Return `memory_type`, `user_id`, `query`, `limit`, `count`, and `items`.
+- If long-term memory is disabled, return structured `MEMORY_STORE_UNAVAILABLE`.
 
 This endpoint is for backend testing and may be disabled in production.
 
@@ -359,6 +361,8 @@ Behavior:
 
 - If `query` is provided, call `PostgresStore.search((user_id, "episodic_memories"), query=query, limit=limit)`.
 - If `query` is absent, list recent memories if supported by store implementation.
+- Return `memory_type`, `user_id`, `query`, `limit`, `count`, and `items`.
+- If long-term memory is disabled, return structured `MEMORY_STORE_UNAVAILABLE`.
 
 This endpoint is for backend testing and may be disabled in production.
 
@@ -556,5 +560,5 @@ Not part of the backend MVP:
 
 The backend is an async FastAPI service that wraps the LangGraph travel planner.
 
-The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Memory extraction produces semantic and episodic candidates from overflow and final valid plans; when `MEMORY_ENABLED=true`, `LoadMemoryNode` and `SaveMemoryNode` use LangGraph `PostgresStore` with Postgres/pgvector and local `bge-m3` embeddings for durable recall. The current MVP exposes `GET /health` and `POST /api/trip/plan`; memory inspection and recalculation endpoints remain later steps.
+The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Memory extraction produces semantic and episodic candidates from overflow and final valid plans; when `MEMORY_ENABLED=true`, `LoadMemoryNode` and `SaveMemoryNode` use LangGraph `PostgresStore` with Postgres/pgvector and local `bge-m3` embeddings for durable recall. The current MVP exposes `GET /health`, `POST /api/trip/plan`, memory inspection endpoints, and a reserved `POST /api/trip/recalculate` endpoint that returns structured `501`.
 
