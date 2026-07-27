@@ -215,7 +215,7 @@ Use `BAAI/bge-m3` through the local embedding provider. The MVP provider is Olla
 Recommended settings:
 
 - Provider: `ollama`
-- Base URL: `http://localhost:11434`
+- Base URL in Docker: `http://host.docker.internal:11434`
 - Model: `bge-m3:567m`
 - API style: Ollama `/api/embed`
 - Vector dimension: `1024`

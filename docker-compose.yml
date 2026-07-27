@@ -1,4 +1,29 @@
 services:
+  api:
+    build:
+      context: ./backend
+    container_name: zoey-agent-api
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: docker
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      MEMORY_ENABLED: "true"
+      POSTGRES_URL: postgresql://zoey:zoey@postgres:5432/zoey_agent
+      EMBEDDING_PROVIDER: ollama
+      EMBEDDING_BASE_URL: http://host.docker.internal:11434
+      EMBEDDING_MODEL: bge-m3:567m
+      EMBEDDING_DIMS: "1024"
+      AMAP_MCP_COMMAND: amap-mcp-server
+      AMAP_MCP_ARGS: ""
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: zoey-agent-postgres

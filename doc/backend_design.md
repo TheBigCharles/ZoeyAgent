@@ -165,25 +165,14 @@ LLM client for PlannerNode and extraction tasks
 Expected environment variables:
 
 ```text
-APP_ENV=local
-MEMORY_ENABLED=true
-POSTGRES_URL=postgresql://...
-
 LLM_BASE_URL=...
 LLM_API_KEY=...
 LLM_MODEL_ID=gemini-3.1-flash-lite
 
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_BASE_URL=http://localhost:11434
-EMBEDDING_MODEL=bge-m3:567m
-EMBEDDING_DIMS=1024
-
 AMAP_MAPS_API_KEY=...
-AMAP_MCP_COMMAND=amap-mcp-server
-AMAP_MCP_ARGS=
 ```
 
-The MVP embedding endpoint is Ollama `/api/embed`; `EmbeddingService` also keeps an OpenAI-compatible path for future vLLM deployment.
+Docker Compose supplies runtime infrastructure variables such as `HOST`, `PORT`, `MEMORY_ENABLED`, `POSTGRES_URL`, `EMBEDDING_*`, and `AMAP_MCP_COMMAND`. The MVP embedding endpoint is Ollama `/api/embed`; from the API container it is reached through `http://host.docker.internal:11434`. `EmbeddingService` also keeps an OpenAI-compatible path for future vLLM deployment.
 
 ## Application Lifecycle
 

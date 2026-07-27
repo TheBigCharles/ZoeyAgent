@@ -13,41 +13,50 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 
 ## 本地启动
 
-在一个 PowerShell 里启动后端：
+本项目只保留 Docker 启动路径。先确认 Docker Desktop 已启动，Ollama 已在宿主机运行并已拉取 `bge-m3:567m`，然后在项目根目录运行：
 
 ```powershell
-C:\Users\awateryMan\anaconda3\envs\zoey_agent\python.exe C:\dev\X\ZoeyAgent\backend\run_server.py
+docker compose up --build
 ```
 
-在另一个 PowerShell 里调用测试请求：
+服务启动后，在另一个 PowerShell 里调用测试请求：
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8000/api/trip/plan" `
   -H "Content-Type: application/json; charset=utf-8" `
-  --data-binary "@trip-request.json"
+  --data-binary "@backend/tests/fixtures/http_requests/trip-request-beijing-public.json"
 ```
 
-`backend/.env` 中的 Amap MCP 可执行文件建议使用正斜杠路径，避免 Windows 反斜杠被 `.env` 解析成转义字符：
+`backend/.env` 只保留 secrets 和 provider 选择，不写 Windows 路径，也不写容器内网络地址。建议保留：
 
 ```text
-AMAP_MCP_COMMAND=../../../../Users/awateryMan/anaconda3/envs/zoey_agent/Scripts/amap-mcp-server.exe
+LLM_BASE_URL=...
+LLM_API_KEY=...
+LLM_MODEL_ID=gemini-3.1-flash-lite
+AMAP_MAPS_API_KEY=...
 ```
 
-HTTP 输入里 `TripPlanRequest.cities` 应传中文城市名，例如 `["北京"]`。当前 Amap MCP 的 POI 搜索对英文城市名不稳定，`["Beijing"]` 可能召回北京以外的 POI；前端展示语言可以自行决定，但传给后端的城市字段应使用高德可稳定识别的中文城市名。
+这些值由 `docker-compose.yml` 统一覆盖，不需要放进 `.env`：`HOST`、`PORT`、`POSTGRES_URL`、`MEMORY_ENABLED`、`EMBEDDING_PROVIDER`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`、`EMBEDDING_DIMS`、`AMAP_MCP_COMMAND`、`AMAP_MCP_ARGS`。
 
-如需启用长期记忆，先启动 Docker Postgres/pgvector 和 Ollama，并在 `backend/.env` 配置 `MEMORY_ENABLED=true`、`POSTGRES_URL=postgresql://zoey:zoey@127.0.0.1:5432/zoey_agent`、`EMBEDDING_PROVIDER=ollama`、`EMBEDDING_BASE_URL=http://localhost:11434`、`EMBEDDING_MODEL=bge-m3:567m`、`EMBEDDING_DIMS=1024`。
+HTTP 输入里 `TripPlanRequest.cities` 应传中文城市名，例如 `["北京"]`。当前 Amap MCP 的 POI 搜索对英文城市名不稳定，`["Beijing"]` 可能召回北京以外的 POI；前端展示语言可以自行决定，但传给后端的城市字段应使用高德可稳定识别的中文城市名。
 
 长期记忆调试接口示例：
 
 ```powershell
-curl.exe "http://127.0.0.1:8000/api/memory/semantic?user_id=browser-test-001&query=轻松历史文化&limit=5"
-curl.exe "http://127.0.0.1:8000/api/memory/episodic?user_id=browser-test-001&limit=5"
+curl.exe -G "http://127.0.0.1:8000/api/memory/semantic" `
+  --data-urlencode "user_id=browser-test-001" `
+  --data-urlencode "query=轻松历史文化" `
+  --data-urlencode "limit=5"
+
+curl.exe -G "http://127.0.0.1:8000/api/memory/episodic" `
+  --data-urlencode "user_id=browser-test-001" `
+  --data-urlencode "limit=5"
 ```
 
 端到端测试请求样例放在 `backend/tests/fixtures/http_requests/`，例如 `trip-request-beijing-public.json`、`trip-request-beijing-driving.json` 和 `trip-recalculate-request.json`。运行本地合同测试：
 
 ```powershell
-C:\Users\awateryMan\anaconda3\envs\zoey_agent\python.exe -m pytest backend/tests/test_e2e_validation.py
+docker compose exec api python -m pytest tests/test_e2e_validation.py
 ```
 
 ## 总体架构

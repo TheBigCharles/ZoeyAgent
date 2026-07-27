@@ -442,7 +442,7 @@ AMAP_MCP_COMMAND=amap-mcp-server
 AMAP_MCP_ARGS=
 ```
 
-The command can later be changed to another MCP launcher if needed. In local development with the existing conda env, using the env executable directly or as a relative path is acceptable when `amap-mcp-server` is not on the shell `PATH`.
+The Docker image installs `amap-mcp-server` from `requirements.txt`, so the container-safe command is simply `amap-mcp-server`. Do not store Windows-specific executable paths in `.env`.
 
 ## Terminal Testing
 
