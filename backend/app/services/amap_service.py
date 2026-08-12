@@ -25,6 +25,23 @@ ROUTE_TOOLS = {
     "driving": "maps_direction_driving_by_address",
     "transit": "maps_direction_transit_integrated_by_address",
 }
+HOTEL_TYPE_KEYWORDS = (
+    "住宿服务",
+    "宾馆酒店",
+    "旅馆招待所",
+    "酒店",
+    "饭店",
+    "旅馆",
+    "客栈",
+    "民宿",
+    "公寓",
+    "hotel",
+    "lodging",
+    "inn",
+    "motel",
+    "hostel",
+    "resort",
+)
 
 
 @dataclass(slots=True)
@@ -63,7 +80,7 @@ class AmapMCPService:
             _without_none({"keywords": keywords, "city": city, "citylimit": "true"}),
         )
         pois = [await self._enrich_poi_coordinates(poi, city=city) for poi in _extract_pois(payload)]
-        return [self._poi_to_hotel(poi) for poi in pois]
+        return [self._poi_to_hotel(poi) for poi in pois if _is_hotel_poi(poi)]
 
     async def get_weather(self, city: str) -> list[WeatherInfo]:
         payload = await self._call_tool(WEATHER_TOOL, {"city": city})
@@ -216,6 +233,19 @@ class AmapMCPService:
 
 def _without_none(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _is_hotel_poi(poi: dict[str, Any]) -> bool:
+    typecode = _optional_str(poi.get("typecode")) or ""
+    if typecode.startswith("100"):
+        return True
+
+    type_text = (_optional_str(poi.get("type")) or "").lower()
+    if type_text:
+        return any(keyword.lower() in type_text for keyword in HOTEL_TYPE_KEYWORDS)
+
+    name = (_optional_str(poi.get("name")) or "").lower()
+    return any(keyword.lower() in name for keyword in HOTEL_TYPE_KEYWORDS)
 
 
 def build_map_points(

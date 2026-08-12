@@ -2,8 +2,8 @@ import asyncio
 import json
 from datetime import date
 
-from app.agents.nodes import make_planner_node, planner_node
-from app.schemas.domain import Attraction, Hotel, Location, WeatherInfo
+from app.agents.nodes import make_planner_node, planner_node, validate_trip_plan
+from app.schemas.domain import Attraction, Hotel, Location, MapPoint, WeatherInfo
 from app.schemas.graph import NormalizedTripRequest, TravelPlanState
 from app.schemas.trip import TripPlan
 
@@ -86,6 +86,110 @@ def test_planner_node_fallback_uses_candidates_to_build_renderable_trip_plan() -
     assert trip_plan.days[0].transit_method == "transit"
     assert [point.point_type for point in trip_plan.days[0].map_points] == ["attraction", "attraction", "hotel"]
     assert trip_plan.days[0].total_price == 550
+
+
+def test_planner_node_fallback_caps_relaxed_single_day_attractions_and_estimates_hotel_cost() -> None:
+    request = normalized_request().model_copy(
+        update={
+            "start_date": date(2026, 12, 25),
+            "end_date": date(2026, 12, 25),
+            "days_count": 1,
+            "accommodation_preferences": ["mid_level_hotel"],
+            "extra_requirements": "中文输出；一天轻松行程；不要太赶。",
+        }
+    )
+    state = planner_state()
+    state["normalized_request"] = request
+    state["attractions"] = [
+        Attraction(
+            name=f"Hangzhou Attraction {index}",
+            city="Hangzhou",
+            address=f"Attraction Road {index}",
+            poi_id=f"HZ-A-{index}",
+            location=Location(longitude=120.1 + index * 0.001, latitude=30.2),
+        )
+        for index in range(12)
+    ]
+    state["hotels"] = [
+        Hotel(
+            name="Hangzhou Mid Hotel",
+            city="Hangzhou",
+            address="Hotel Road 1",
+            poi_id="HZ-H-1",
+            type="住宿服务;宾馆酒店;宾馆酒店",
+            estimated_cost=0,
+            location=Location(longitude=120.16, latitude=30.25),
+        )
+    ]
+
+    result = asyncio.run(planner_node(state))
+    trip_plan = TripPlan.model_validate(result["trip_plan"])
+
+    assert len(trip_plan.days) == 1
+    assert len(trip_plan.days[0].attractions) == 3
+    assert trip_plan.days[0].hotel is not None
+    assert trip_plan.days[0].hotel.estimated_cost == 600
+    assert trip_plan.days[0].total_price == 660
+
+
+def test_validate_trip_plan_rejects_too_many_attractions_for_relaxed_day() -> None:
+    request = normalized_request().model_copy(
+        update={
+            "start_date": date(2026, 12, 25),
+            "end_date": date(2026, 12, 25),
+            "days_count": 1,
+            "extra_requirements": "一天轻松行程，不要太赶。",
+        }
+    )
+    attractions = [
+        Attraction(
+            name=f"Attraction {index}",
+            city="Hangzhou",
+            location=Location(longitude=120.1 + index * 0.001, latitude=30.2),
+        )
+        for index in range(6)
+    ]
+    trip_plan = TripPlan(
+        session_id="session-planner-001",
+        cities=["Beijing"],
+        start_date=date(2026, 12, 25),
+        end_date=date(2026, 12, 25),
+        days=[
+            {
+                "date": date(2026, 12, 25),
+                "day_index": 0,
+                "city": "Beijing",
+                "description": "Too dense.",
+                "transportation": "public_transport",
+                "accommodation": "budget_hotel",
+                "attractions": attractions,
+                "map_points": [
+                    MapPoint(
+                        name=attraction.name,
+                        city=attraction.city,
+                        location=attraction.location,
+                        day_index=0,
+                        order_index=index,
+                    )
+                    for index, attraction in enumerate(attractions)
+                    if attraction.location is not None
+                ],
+                "total_price": 100,
+            }
+        ],
+        weather_info=[],
+        overall_suggestions="Too dense.",
+    )
+    state = {
+        "normalized_request": request,
+        "trip_plan": trip_plan,
+        "tool_observations": [],
+        "memory_candidates": [],
+    }
+
+    result = asyncio.run(validate_trip_plan(state))
+
+    assert any("must not include more than 3 attractions" in error for error in result["validation_errors"])
 
 
 def test_planner_node_uses_llm_structured_trip_plan_when_service_is_available() -> None:

@@ -19,7 +19,13 @@ ZoeyAgent 是一个面向旅行规划场景的 Agent 应用后端设计。当前
 docker compose up --build
 ```
 
-服务启动后，在另一个 PowerShell 里调用测试请求：
+前端地图使用 `frontend/.env` 中的 `VITE_AMAP_WEB_JS_KEY`。如果要显示高德地图 canvas 和 marker，请先把你的 Web JS API key 写入：
+
+```text
+VITE_AMAP_WEB_JS_KEY=your_amap_web_key
+```
+
+服务启动后，前端入口是 `http://127.0.0.1:3000`，后端 API 仍然暴露在 `http://127.0.0.1:8000`。在另一个 PowerShell 里可以调用测试请求：
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8000/api/trip/plan" `
@@ -57,6 +63,13 @@ curl.exe -G "http://127.0.0.1:8000/api/memory/episodic" `
 
 ```powershell
 docker compose exec api python -m pytest tests/test_e2e_validation.py
+```
+
+前端是 React/Vite 应用，生产容器用 Nginx 托管静态 build，并把 `/api/*` 代理到 `api:8000`。前端构建和测试也通过 Docker 运行，避免依赖本机 Node 环境：
+
+```powershell
+docker compose build frontend
+docker compose run --rm frontend-test
 ```
 
 ## 总体架构

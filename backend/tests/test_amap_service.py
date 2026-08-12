@@ -98,6 +98,42 @@ def test_search_hotels_uses_maps_text_search_and_normalizes_candidates() -> None
     assert hotels[0].source == "amap"
 
 
+def test_search_hotels_filters_out_non_lodging_pois() -> None:
+    fake_client = FakeMCPClient(
+        {
+            "maps_text_search": {
+                "pois": [
+                    {
+                        "id": "SCENIC001",
+                        "name": "杭州西湖风景名胜区",
+                        "cityname": "杭州市",
+                        "address": "西湖街道龙井路1号",
+                        "location": "120.130000,30.260000",
+                        "type": "风景名胜;风景名胜;国家级景点",
+                        "biz_ext": {"rating": "4.9"},
+                    },
+                    {
+                        "id": "HOTEL001",
+                        "name": "杭州测试酒店",
+                        "cityname": "杭州市",
+                        "address": "测试路1号",
+                        "location": "120.160000,30.250000",
+                        "type": "住宿服务;宾馆酒店;宾馆酒店",
+                        "typecode": "100100",
+                        "biz_ext": {"rating": "4.6", "cost": "600"},
+                    },
+                ]
+            }
+        }
+    )
+    service = AmapMCPService(settings=make_settings(), client=fake_client)
+
+    hotels = asyncio.run(service.search_hotels(keywords="西湖 酒店", city="杭州"))
+
+    assert [hotel.name for hotel in hotels] == ["杭州测试酒店"]
+    assert all("风景名胜" not in hotel.type for hotel in hotels)
+
+
 def test_get_weather_uses_maps_weather_and_normalizes_forecast_casts() -> None:
     fake_client = FakeMCPClient(
         {

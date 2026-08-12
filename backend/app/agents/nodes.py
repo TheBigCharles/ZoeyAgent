@@ -21,6 +21,14 @@ from app.memory.extraction import MemoryExtractionService
 
 
 MAX_REPAIR_ATTEMPTS = 2
+DEFAULT_MAX_ATTRACTIONS_PER_DAY = 4
+RELAXED_MAX_ATTRACTIONS_PER_DAY = 3
+HOTEL_COST_ESTIMATES = {
+    "budget_hotel": 300,
+    "mid_level_hotel": 600,
+    "five_star_hotel": 1200,
+}
+RELAXED_REQUIREMENT_HINTS = ("relaxed", "轻松", "不赶", "不要太赶", "慢节奏", "悠闲")
 
 
 async def initialize_working_state(state: TravelPlanState) -> dict[str, Any]:
@@ -218,6 +226,8 @@ def _planner_messages(state: TravelPlanState) -> list[dict[str, str]]:
                 "你是主旅行规划 PlannerNode。只返回合法 JSON，不要返回 markdown。"
                 "输出必须匹配 TripPlan schema，并包含 resolved session_id。"
                 "餐食规划暂时 deferred；meals 可以为空或只包含已有候选，不要为了凑三餐编造餐厅。"
+                "轻松行程每天最多安排 3 个景点，普通行程每天最多安排 4 个景点；不要把全部候选塞进单日。"
+                "如果酒店候选缺少实时价格，只能使用 estimated_cost 作为估算值，不要声称是真实房价。"
                 "可以使用 route_distance_km、route_duration_minutes、transit_method 这类路线摘要，"
                 "不要输出完整 turn-by-turn 路线步骤，不要求 image_url。"
             ),
@@ -265,12 +275,12 @@ def _build_deterministic_trip_plan(state: TravelPlanState) -> TripPlan:
     normalized = state["normalized_request"]
     days = []
     attractions = list(state.get("attractions", []))
-    hotel = _selected_hotel(state)
+    hotel = _selected_hotel(state, normalized)
 
     for day_index in range(normalized.days_count):
         current_date = normalized.start_date + timedelta(days=day_index)
         city = normalized.cities[min(day_index, len(normalized.cities) - 1)]
-        day_attractions = _attractions_for_day(attractions, day_index, normalized.days_count)
+        day_attractions = _attractions_for_day(attractions, day_index, normalized)
         meals = _default_meals(city)
         map_points = build_map_points(
             day_index=day_index,
@@ -308,24 +318,52 @@ def _build_deterministic_trip_plan(state: TravelPlanState) -> TripPlan:
     )
 
 
-def _selected_hotel(state: TravelPlanState) -> Hotel | None:
+def _selected_hotel(state: TravelPlanState, normalized: NormalizedTripRequest) -> Hotel | None:
     hotel_result = state.get("hotel_search_result")
     if hotel_result is not None and hotel_result.selected_hotel is not None:
-        return hotel_result.selected_hotel
+        return _with_estimated_hotel_cost(hotel_result.selected_hotel, normalized)
     hotels = list(state.get("hotels", []))
-    return hotels[0] if hotels else None
+    return _with_estimated_hotel_cost(hotels[0], normalized) if hotels else None
 
 
-def _attractions_for_day(attractions: list[Attraction], day_index: int, days_count: int) -> list[Attraction]:
+def _attractions_for_day(
+    attractions: list[Attraction],
+    day_index: int,
+    normalized: NormalizedTripRequest,
+) -> list[Attraction]:
     if not attractions:
         return []
-    chunk_size = max(1, (len(attractions) + max(days_count, 1) - 1) // max(days_count, 1))
+    days_count = max(normalized.days_count, 1)
+    chunk_size = min(
+        _max_attractions_per_day(normalized),
+        max(1, (len(attractions) + days_count - 1) // days_count),
+    )
     start = day_index * chunk_size
     end = start + chunk_size
     return [
         attraction.model_copy(update={"order_index": order_index})
         for order_index, attraction in enumerate(attractions[start:end])
     ]
+
+
+def _max_attractions_per_day(normalized: NormalizedTripRequest) -> int:
+    if any(hint in normalized.extra_requirements.lower() for hint in RELAXED_REQUIREMENT_HINTS):
+        return RELAXED_MAX_ATTRACTIONS_PER_DAY
+    return DEFAULT_MAX_ATTRACTIONS_PER_DAY
+
+
+def _with_estimated_hotel_cost(hotel: Hotel, normalized: NormalizedTripRequest) -> Hotel:
+    if hotel.estimated_cost > 0:
+        return hotel
+    return hotel.model_copy(update={"estimated_cost": _fallback_hotel_cost(normalized)})
+
+
+def _fallback_hotel_cost(normalized: NormalizedTripRequest) -> int:
+    for preference in normalized.accommodation_preferences:
+        estimate = HOTEL_COST_ESTIMATES.get(preference)
+        if estimate is not None:
+            return estimate
+    return HOTEL_COST_ESTIMATES["mid_level_hotel"]
 
 
 def _default_meals(city: str) -> list[Meal]:
@@ -498,6 +536,13 @@ def _business_validation_errors(trip_plan: TripPlan, state: TravelPlanState) -> 
                 )
         if _has_located_entities(day) and not day.map_points:
             errors.append(f"days[{expected_index}].map_points must include anchors for located entities")
+        if normalized is not None:
+            max_attractions = _max_attractions_per_day(normalized)
+            if len(day.attractions) > max_attractions:
+                errors.append(
+                    f"days[{expected_index}].attractions must not include more than "
+                    f"{max_attractions} attractions for this trip pace"
+                )
 
     return errors
 

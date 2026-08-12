@@ -301,6 +301,55 @@ def test_hotel_search_deduplicates_and_ranks_map_ready_candidates() -> None:
     assert hotels[0].location is not None
 
 
+def test_hotel_search_filters_out_non_lodging_candidates_from_client() -> None:
+    llm = FakeLLM(
+        [
+            llm_response({"steps": [{"city": "Hangzhou", "anchor": "West Lake", "intent": "hotel", "suggested_keywords": ["hotel"]}]}),
+            llm_response(
+                {
+                    "tool_name": "search_hotels",
+                    "keywords": "hotel",
+                    "city": "杭州",
+                    "anchor": "West Lake",
+                    "rationale": "Search hotels near the anchor.",
+                }
+            ),
+        ]
+    )
+    amap = FakeAmap(
+        [
+            [
+                Hotel(
+                    name="杭州西湖风景名胜区",
+                    city="杭州市",
+                    poi_id="SCENIC-1",
+                    type="风景名胜;风景名胜;国家级景点",
+                    rating=4.9,
+                    location=Location(longitude=120.13, latitude=30.26),
+                ),
+                Hotel(
+                    name="杭州测试酒店",
+                    city="杭州市",
+                    poi_id="HOTEL-1",
+                    type="住宿服务;宾馆酒店;宾馆酒店",
+                    rating=4.6,
+                    estimated_cost=600,
+                    location=Location(longitude=120.16, latitude=30.25),
+                ),
+            ]
+        ]
+    )
+
+    async def run_node() -> TravelPlanState:
+        node = make_hotel_search_node(amap_client=amap, llm_service=llm, max_retries=0)
+        return await node(state())
+
+    result = asyncio.run(run_node())
+
+    assert [hotel.name for hotel in result["hotels"]] == ["杭州测试酒店"]
+    assert result["hotel_search_result"].selected_hotel.name == "杭州测试酒店"
+
+
 def test_hotel_search_retries_with_observation_in_llm_context() -> None:
     llm = FakeLLM(
         [

@@ -6,10 +6,15 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_docker_compose_defines_api_and_postgres_services() -> None:
+def test_docker_compose_defines_frontend_api_and_postgres_services() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
 
-    assert set(compose["services"]) == {"api", "postgres"}
+    assert set(compose["services"]) == {"frontend", "frontend-test", "api", "postgres"}
+    frontend = compose["services"]["frontend"]
+    assert frontend["build"]["context"] == "./frontend"
+    assert frontend["ports"] == ["3000:80"]
+    assert frontend["depends_on"] == ["api"]
+
     api = compose["services"]["api"]
     assert api["build"]["context"] == "./backend"
     assert api["ports"] == ["8000:8000"]

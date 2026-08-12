@@ -1,4 +1,5 @@
 from uuid import UUID
+import logging
 
 from fastapi.testclient import TestClient
 
@@ -74,6 +75,22 @@ def test_plan_endpoint_reuses_existing_session_id() -> None:
     assert response.status_code == 200
     trip_plan = TripPlan.model_validate(response.json())
     assert trip_plan.session_id == "existing-session-001"
+
+
+def test_plan_endpoint_logs_resolved_session_id(caplog, capsys) -> None:
+    payload = minimal_trip_request()
+    payload["session_id"] = "existing-session-001"
+
+    with caplog.at_level(logging.INFO, logger="zoey_agent.trip"):
+        with TestClient(create_app(dependency_factory=controlled_graph_dependencies)) as client:
+            response = client.post("/api/trip/plan", json=payload)
+
+    assert response.status_code == 200
+    assert "existing-session-001" in caplog.text
+    assert "Trip planning session resolved" in caplog.text
+    stdout = capsys.readouterr().out
+    assert "existing-session-001" in stdout
+    assert "Trip planning session resolved" in stdout
 
 
 def test_plan_endpoint_returns_trip_plan_from_graph_dependency() -> None:

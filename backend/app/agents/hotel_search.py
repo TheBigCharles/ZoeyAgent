@@ -17,6 +17,23 @@ from app.services.llm_service import validate_structured_output
 
 
 HOTEL_TOOL_NAME = "search_hotels"
+LODGING_TYPE_KEYWORDS = (
+    "住宿服务",
+    "宾馆酒店",
+    "旅馆招待所",
+    "酒店",
+    "饭店",
+    "旅馆",
+    "客栈",
+    "民宿",
+    "公寓",
+    "hotel",
+    "lodging",
+    "inn",
+    "motel",
+    "hostel",
+    "resort",
+)
 
 
 class HotelSearchPlanStep(BaseModel):
@@ -114,7 +131,14 @@ def make_hotel_search_node(
                 local_state.local_observations.append(f"quality warning: {local_state.quality.reason}")
                 continue
 
-            new_candidates = _deduplicate(candidates)
+            lodging_candidates = _filter_lodging_candidates(candidates)
+            dropped_count = len(candidates) - len(lodging_candidates)
+            if dropped_count:
+                local_state.local_observations.append(
+                    f"Hotel search dropped {dropped_count} non-lodging candidates."
+                )
+
+            new_candidates = _deduplicate(lodging_candidates)
             route_candidates = await _maybe_enrich_route_summaries(
                 amap_client=amap_client,
                 state=state,
@@ -299,6 +323,17 @@ def _hotel_key(hotel: Hotel) -> str:
     if hotel.poi_id:
         return f"poi:{hotel.poi_id}"
     return f"name:{hotel.city or ''}:{hotel.name}:{hotel.address}"
+
+
+def _filter_lodging_candidates(hotels: list[Hotel]) -> list[Hotel]:
+    return [hotel for hotel in hotels if _is_lodging_candidate(hotel)]
+
+
+def _is_lodging_candidate(hotel: Hotel) -> bool:
+    if not hotel.type:
+        return True
+    type_text = hotel.type.lower()
+    return any(keyword.lower() in type_text for keyword in LODGING_TYPE_KEYWORDS)
 
 
 def _rank_hotels(hotels: list[Hotel], state: TravelPlanState) -> list[Hotel]:

@@ -1,5 +1,6 @@
 """Trip planning routes."""
 
+import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends
@@ -17,6 +18,7 @@ from app.agents.trip_planner_agent import build_initial_state
 from app.schemas.trip import TripPlan, TripPlanRequest, TripRecalculateRequest
 
 router = APIRouter(prefix="/api/trip", tags=["trip"])
+logger = logging.getLogger("zoey_agent.trip")
 
 
 @router.post("/plan", response_model=TripPlan)
@@ -25,6 +27,18 @@ async def create_trip_plan(
     dependencies: AppDependencies = Depends(get_app_dependencies),
 ) -> TripPlan:
     session_id = request.session_id or str(uuid4())
+    session_source = "provided" if request.session_id else "generated"
+    logger.info(
+        "Trip planning session resolved: session_id=%s source=%s user_id=%s",
+        session_id,
+        session_source,
+        request.user_id,
+    )
+    print(
+        f"Trip planning session resolved: session_id={session_id} "
+        f"source={session_source} user_id={request.user_id}",
+        flush=True,
+    )
     resolved_request = request.model_copy(update={"session_id": session_id})
     try:
         result_state = await dependencies.graph.ainvoke(
