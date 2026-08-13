@@ -194,8 +194,8 @@ Pydantic 的作用是把这些输出约束成明确模型。`TripPlanRequest` �
 ```mermaid
 flowchart TB
     frontend["前端表单"] --> request["TripPlanRequest<br/>输入校验"]
-    request --> graph["TravelPlanState<br/>内部状态"]
-    graph --> planner["PlannerNode<br/>结构化输出"]
+    request --> planState["TravelPlanState<br/>内部状态"]
+    planState --> planner["PlannerNode<br/>结构化输出"]
     planner --> trip["TripPlan<br/>响应合同"]
     trip --> frontendResult["前端直接渲染"]
 ```
@@ -249,11 +249,11 @@ flowchart LR
 ```mermaid
 flowchart TB
     user["用户输入城市 日期 偏好 预算"] --> api["FastAPI + Pydantic<br/>校验 TripPlanRequest"]
-    api --> graph["LangGraph<br/>创建 TravelPlanState"]
-    graph --> memory["LoadMemoryNode<br/>召回长期记忆"]
-    graph --> react["ReAct specialist subgraphs<br/>景点和酒店搜索"]
+    api --> workflow["LangGraph<br/>创建 TravelPlanState"]
+    workflow --> memory["LoadMemoryNode<br/>召回长期记忆"]
+    workflow --> react["ReAct specialist subgraphs<br/>景点和酒店搜索"]
     react --> mcp["Amap MCP<br/>真实地图工具"]
-    graph --> context["ContextAssembler<br/>挑选高价值上下文"]
+    workflow --> context["ContextAssembler<br/>挑选高价值上下文"]
     context --> llm["Gemini PlannerNode<br/>生成 TripPlan 草稿"]
     llm --> validate["ValidateTripPlanNode<br/>校验和 repair"]
     validate --> response["TripPlan<br/>前端直接渲染"]
