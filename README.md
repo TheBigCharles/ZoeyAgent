@@ -6,7 +6,7 @@
 
 ## 文档导航
 
-**在开始升入了解项目之前，请先补齐** Agent 范式、MCP、记忆、上下文工程和结构化数据合同等 **背景知识**，可以阅读 [Background Knowledge](background_knowledge.md)。
+**在开始深入了解项目之前，请先补齐** Agent 范式、MCP、记忆、上下文工程和结构化数据合同等 **背景知识**，可以阅读 [Background Knowledge](background_knowledge.md)。
 
 如果你想先理解系统是如何工作的，建议从 [Walk Through](walk_through.md) 开始。它会按总体架构、组件职责和 Pydantic 数据结构解释一次请求如何被编排。
 
