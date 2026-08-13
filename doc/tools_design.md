@@ -1,480 +1,484 @@
-﻿# Tools Design
+# 工具层设计
 
-This document describes the external tool integration design for the travel planning assistant.
+这份文档说明 ZoeyAgent 如何接入外部工具。旅行规划需要真实世界数据：景点、酒店、天气、坐标和路线摘要都不能只靠 LLM 编造。工具层的职责就是把外部 provider 的复杂响应封装起来，给 graph 节点返回项目内部可用的 Pydantic 模型。
 
-The agents workflow depends on external services for location search and weather. These services should be wrapped behind clear tool/service boundaries so graph nodes do not need to know provider-specific API details.
+当前 MVP 使用 Amap MCP。图片 enrichment、完整路线导航和真实酒店库存都暂时 deferred。
 
-## Background
+## 背景
 
-The travel planner needs external data:
+旅行规划需要这些外部数据：
 
-- Attractions and hotels from Amap POI search
-- Weather from Amap weather tools
-- Deferred attraction images from Unsplash or another image provider
+- Amap POI 搜索提供景点和酒店候选。
+- Amap detail/geocode 提供坐标补全。
+- Amap weather 提供天气。
+- Amap direction tools 提供轻量路线摘要。
 
-External providers return inconsistent data shapes. For example, Amap may return coordinates as a string like `"116.397128,39.916527"`, while other providers may use `lng`, `lon`, `longitude`, or nested coordinate fields.
+外部工具返回的数据形状并不稳定。例如，坐标可能是 `"116.397128,39.916527"` 字符串，也可能需要通过 detail 或 geocode 额外补全。如果这些 raw response 直接进入 Planner，LLM 很容易被 provider 字段干扰，前端也很难稳定渲染。
 
-The tool layer is responsible for hiding those provider differences and returning normalized data that can be converted into the Pydantic schemas defined in `schemas_design.md`.
+因此工具层必须尽早归一化。
 
-## Design Direction
+## 设计方向
 
-Use MCP for Amap tools.
-
-Defer direct service wrappers for Unsplash image enrichment.
-
-Reasoning:
-
-- Amap tools are interactive search/query tools used by graph subgraphs.
-- Amap provides several related capabilities, so one shared MCP server is useful.
-- Unsplash image lookup is deferred for the MVP. Schema slots can remain nullable for future enrichment.
-
-## Amap MCP Integration
-
-Use a shared Amap MCP server instance.
-
-The backend acts as the MCP client. The Amap MCP server runs through stdio for the MVP and is owned by one shared `AmapMCPService` instance. The service may open the stdio session lazily on the first real tool call, but all Amap calls should still go through the same service boundary.
-
-Conceptual setup:
-
-```python
-mcp_tool = MCPTool(
-    name="amap_mcp",
-    command="amap-mcp-server",
-    args=[],
-    env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-    auto_expand=True,
-)
-```
-
-The exact runtime wrapper may differ from the example framework, but the design decision is the same:
+使用一个共享的 Amap MCP service：
 
 ```text
-one shared Amap MCP process
-auto-discovered tools
-all Amap calls routed through that shared process
-```
-
-Conceptual call path:
-
-```text
-LangGraph node/subgraph
-  -> shared MCP client/tool wrapper
-  -> Amap MCP server process
-  -> Amap external HTTP API
-  -> MCP response
+LangGraph node / specialist subgraph
+  -> AmapMCPService
+  -> MCP Python client
+  -> sugarforever/amap-mcp-server
+  -> Amap external API
   -> normalized Pydantic model
 ```
 
-The reference material shows HelloAgents parsing string markers such as:
+设计原则：
+
+- graph 节点不直接调用 raw MCP。
+- Planner 不直接读取 raw Amap response。
+- Amap MCP server 不为每个子图重复启动。
+- 所有 Amap 工具调用都经过 `AmapMCPService`。
+- 工具失败时写入简短 observation，而不是让整个 graph 崩溃。
+
+## Amap MCP 集成
+
+当前使用 `sugarforever/amap-mcp-server`，通过 stdio 方式连接。
+
+Docker-safe 配置：
 
 ```text
-[TOOL_CALL:maps_text_search:keywords=景点,city=北京]
+AMAP_MCP_COMMAND=amap-mcp-server
+AMAP_MCP_ARGS=
+AMAP_MAPS_API_KEY=...
 ```
 
-This project should not depend on string tool-call markers inside prompts. In the LangGraph design, graph nodes/subgraphs call the tool wrapper directly or through structured tool-calling. The MCP server and Amap API usage are the same; only the agent-tool invocation style is different.
+不要在 `.env` 里写 Windows 本机路径，例如 `C:\Users\...\amap-mcp-server.exe`。Docker 镜像内已经安装 server，容器中直接使用命令名即可。
 
-## Shared Tool Instance
+概念调用路径：
 
-The system should not start a separate Amap MCP server for each subgraph.
+```mermaid
+sequenceDiagram
+    participant Node as Graph 节点
+    participant Service as AmapMCPService
+    participant Client as MCP Client
+    participant Server as Amap MCP Server
+    participant API as Amap API
 
-Use one shared instance because:
+    Node->>Service: search_attractions / search_hotels / weather
+    Service->>Client: call_tool(...)
+    Client->>Server: stdio JSON-RPC
+    Server->>API: HTTP request
+    API-->>Server: provider response
+    Server-->>Client: MCP result
+    Client-->>Service: raw tool result
+    Service-->>Node: normalized domain model
+```
 
-- It avoids multiple background MCP processes.
-- It reduces CPU and memory overhead.
-- It makes API rate limiting easier.
-- It keeps tool availability consistent across subgraphs.
+## MVP 使用的 MCP 工具
 
-Consumers:
-
-- `AttractionSearchSubgraph`
-- `WeatherQueryNode`
-- `HotelSearchSubgraph`
-- future route/transport nodes
-
-## Amap Tool Usage
-
-MVP required MCP tools:
-
-- `maps_text_search`
-- `maps_search_detail`
-- `maps_geo`
-- `maps_weather`
-- `maps_direction_walking_by_address`
-- `maps_direction_driving_by_address`
-- `maps_direction_transit_integrated_by_address`
-
-Future optional MCP tools:
-
-- `maps_around_search`
-- `maps_regeocode`
-
-MVP usage:
-
-- Attraction and hotel search use `maps_text_search`.
-- Provider-facing city input should use Chinese city names, for example `北京`. In real MCP testing, English city names such as `Beijing` can produce unstable POI recall outside the intended city.
-- POI coordinate enrichment uses `maps_search_detail` first and `maps_geo` as a fallback when text-search results do not include usable coordinates.
-- Weather uses `maps_weather`.
-- Search detail, around search, geocode, and regeocode are available to specialist subgraphs for step-level search refinement, radius expansion, parking checks, approximate coordinate-distance checks, and richer POI normalization.
-- Direction tools may be used for lightweight route summary signals such as distance, estimated time, and transport mode. Full route instructions are deferred for the MVP.
-
-### Attraction Search
-
-Consumer:
-
-- `AttractionSearchSubgraph`
-
-Tool:
+当前需要支持的真实 MCP 工具名：
 
 ```text
 maps_text_search
 maps_search_detail
+maps_geo
+maps_weather
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
+```
+
+未来可考虑的工具：
+
+```text
+maps_regeocode
 maps_around_search
+```
+
+当前实现不要把 `maps_around_search` 当成必须存在的 MVP 工具。酒店和景点的搜索主要通过 text search、detail 和 geocode 完成。
+
+## 城市输入规则
+
+面向 Amap 查询时，`TripPlanRequest.cities` 应传中文城市名，例如：
+
+```json
+["北京"]
+```
+
+真实测试中，英文城市名例如 `["Beijing"]` 可能召回北京以外的 POI。因此前端可以自行决定 UI 展示语言，但传给后端的 provider-facing 城市字段应使用高德可稳定识别的中文城市名。
+
+## 景点搜索
+
+消费者：
+
+```text
+AttractionSearchSubgraph
+```
+
+项目内部入口：
+
+```python
+AmapMCPService.search_attractions(keywords, city)
+```
+
+内部可能调用：
+
+```text
+maps_text_search
+maps_search_detail
+maps_geo
+```
+
+归一化目标：
+
+```python
+AttractionSearchResult
+Attraction
+```
+
+工作方式：
+
+1. 子图 LLM 生成受限 action，例如搜索“杭州 自然风光”。
+2. executor 调用 `AmapMCPService.search_attractions(...)`。
+3. service 调用 `maps_text_search`。
+4. 如果 text search 返回 POI ID 但缺坐标，调用 `maps_search_detail`。
+5. 如果 detail 仍缺坐标，调用 `maps_geo`。
+6. 归一化为 `Attraction`。
+7. 子图去重、排序、质量评估，写回 `AttractionSearchResult`。
+
+景点子图不能把 raw MCP response 直接写给 Planner。
+
+## 酒店搜索
+
+消费者：
+
+```text
+HotelSearchSubgraph
+```
+
+项目内部入口：
+
+```python
+AmapMCPService.search_hotels(keywords, city)
+AmapMCPService.route_summary(...)
+```
+
+内部可能调用：
+
+```text
+maps_text_search
+maps_search_detail
 maps_geo
 maps_direction_walking_by_address
 maps_direction_driving_by_address
 maps_direction_transit_integrated_by_address
 ```
 
-Inputs:
-
-- `keywords`
-- `city`
-
-Output:
-
-- raw MCP result text or structured content, depending on server response
-
-Normalization target:
+归一化目标：
 
 ```python
-AttractionSearchResult
+HotelSearchResult
+Hotel
 ```
 
-The subgraph should never pass raw provider responses directly to `PlannerNode`. It should normalize, deduplicate, rank, and return Pydantic-compatible attraction candidates.
+酒店搜索需要基于景点 anchor、预算、交通方式和住宿偏好。自驾场景下，还要关注停车便利性或到主要景点区域的驾车时间。
 
-The attraction subgraph is a local Plan-and-Solve workflow. Its per-step ReAct executor may call restricted Amap tools, then a step evaluator decides whether the results are good enough or whether the subgraph should retry with alternate keywords, nearby anchors, or expanded search scope.
+重要限制：
 
-Optional refinements:
+- Amap POI 可以发现酒店候选。
+- Amap POI 不能确认真实房态。
+- Amap POI 不能保证实时价格。
+- 输出应理解为 `candidate_hotels`，不是 booking guarantee。
 
-- `maps_search_detail` should enrich selected POIs when text search returns a POI ID but no coordinates.
-- `maps_around_search` can find nearby attractions or restaurants once a location is known.
-- `maps_geo` should convert city + address/name to coordinates when POI detail is unavailable or still lacks usable coordinates.
-- Direction tools can estimate lightweight distance/time/mode between candidate attractions or from hotel anchors, but should not return step-by-step route instructions.
+酒店 route 字段只保存轻量摘要：
 
-### Weather Query
+```text
+distance_to_main_area_km
+estimated_travel_time_minutes
+transit_method
+```
 
-Consumer:
+## 天气查询
 
-- `WeatherQueryNode`
+消费者：
 
-Tool:
+```text
+WeatherQueryNode
+```
+
+工具：
 
 ```text
 maps_weather
 ```
 
-Inputs:
-
-- `city`
-
-Output:
-
-- raw weather response
-
-Normalization target:
+归一化目标：
 
 ```python
 list[WeatherInfo]
 ```
 
-`WeatherQueryNode` should normalize temperatures, dates, day/night weather, wind direction, and wind power into `WeatherInfo`.
-
-### Hotel Search
-
-Consumer:
-
-- `HotelSearchSubgraph`
-
-Tool:
+天气节点不需要 LLM，也不需要 ReAct。它只负责调用工具并把结果转成：
 
 ```text
-maps_text_search
-maps_around_search
-maps_geo
-maps_direction_walking_by_address
-maps_direction_driving_by_address
-maps_direction_transit_integrated_by_address
+city
+date
+day_weather
+night_weather
+day_temp
+night_temp
+wind_direction
+wind_power
 ```
 
-Inputs:
+如果 provider 只返回近期天气，不应伪造远期天气。
 
-- `keywords`
-- `city`
+## Route Summary
 
-Example keyword strategies:
+direction tools 可以用于轻量路线摘要，但不返回完整路线说明。
 
-- `"经济型酒店"`
-- `"豪华酒店"`
-- `"{main_attraction_name} 附近 酒店"`
-- `"{business_area} 酒店"`
-
-Normalization target:
-
-```python
-HotelSearchResult
-```
-
-The hotel subgraph should evaluate distance, price, rating, hotel level, transportation convenience, and parking suitability before returning final hotel candidates.
-
-The hotel subgraph is a local Plan-and-Solve workflow. Its task planner chooses hotel search anchors such as attraction clusters, dinner areas, transit hubs, business districts, or parking-convenient areas. Its ReAct executor calls restricted Amap POI/geocode/direction tools, then a step evaluator validates candidate count, distance/time quality, price/rating fit, and parking checks for driving trips.
-
-Important limitation:
-
-- Amap POI tools can discover hotel candidates and nearby parking, but they do not guarantee room availability for a date range.
-- Until a booking/availability provider is added, the output should be treated as `candidate_hotels`, not confirmed available rooms.
-
-Optional refinements:
-
-- `maps_around_search` can search near selected attraction clusters.
-- `maps_around_search` can search for nearby parking lots when the trip uses driving.
-- `maps_search_detail` and `maps_geo` should be used to make hotel candidates map-ready before route summaries are computed.
-- Direction tools can estimate public transit suitability, walkability, and driving convenience as summary signals.
-- Direction tool outputs should be reduced to distance, estimated duration, and transport mode. Do not expose detailed route steps such as bus line, station count, turn-by-turn walking, or driving instructions in the MVP response.
-
-### Route Summary and Geocoding Tools
-
-Route and geocoding tools are part of the Amap MCP server. The MVP may use them for route summary signals, but full route planning instructions are deferred.
-
-OCR source table confirms the available Amap MCP route/geocoding tools:
+可用工具：
 
 ```text
 maps_direction_walking_by_address
 maps_direction_driving_by_address
 maps_direction_transit_integrated_by_address
-maps_geo
-maps_regeocode
 ```
 
-Allowed MVP use:
+允许返回：
 
-- distance radius checks
-- estimated travel duration
-- transport mode comparison
-- hotel-to-attraction travel-time checks
-- transit-oriented hotel selection
-- address normalization
+```text
+route_distance_km
+route_duration_minutes
+transit_method
+```
 
-Deferred:
+不返回：
 
-- map polyline display
-- detailed bus/subway line instructions
-- station counts
-- turn-by-turn walking or driving instructions
+```text
+公交线路细节
+站点数量
+换乘详情
+步行/驾车逐步导航
+完整 polyline
+turn-by-turn instructions
+```
 
-If summary route data is unavailable, the graph should keep route slots nullable and return `route_distance_km = None` and `route_duration_minutes = None`.
+如果路线摘要不可用，字段保持 `None`：
 
-Route summary is not map data. It contains only distance, estimated duration, and transport mode. Frontend map rendering still depends on `MapPoint.location`, so POI coordinate enrichment must run before building `DayPlan.map_points`.
+```text
+route_distance_km = None
+route_duration_minutes = None
+```
+
+Route summary 不是地图数据。前端地图渲染依赖 `MapPoint.location`，因此地图点仍然必须来自带坐标的景点、酒店或餐食。
 
 ## Provider Response Normalization
 
-Tool outputs should be normalized as early as possible.
+### 坐标
 
-### Coordinates
-
-Amap may return coordinates as:
+Amap 可能返回：
 
 ```text
 "116.397128,39.916527"
 ```
 
-Normalize to:
+工具层应转换为：
 
 ```python
 Location(longitude=116.397128, latitude=39.916527)
 ```
 
-Real `maps_text_search` responses from `sugarforever/amap-mcp-server` may contain only `id`, `name`, `address`, and `typecode`. In that case:
+真实 `maps_text_search` 响应可能只包含：
 
-1. Call `maps_search_detail(id)` and use its `location`, `city`, `type`, and `biz_ext` fields when available.
-2. If detail has no usable `location`, call `maps_geo(address=<address or name>, city=<city>)`.
-3. Write the resulting `Location` back into the normalized `Attraction` or `Hotel`.
-4. Generate `MapPoint` only from normalized entities that have valid coordinates.
+```text
+id
+name
+address
+typecode
+```
 
-### Ratings
+坐标补全流程：
 
-Ratings may be returned as strings or missing values.
+```text
+maps_text_search
+  -> if poi_id exists and no location: maps_search_detail(id)
+  -> if detail still has no location: maps_geo(address/name, city)
+  -> normalized Attraction / Hotel
+  -> create MapPoint only if location exists
+```
 
-Normalize to:
+### 评分
+
+provider 评分可能是字符串，也可能缺失。归一化为：
 
 ```python
 float | None
 ```
 
-with valid range:
+有效范围：
 
 ```text
 0 <= rating <= 5
 ```
 
-### Prices
+### 价格
 
-Prices may be missing, free-form, or textual.
-
-Normalize to:
+价格可能缺失、文本化或不可解析。归一化为：
 
 ```python
 int
 ```
 
-Use `0` when unknown or free.
+未知价格使用 `0`，表示暂时无法估算，不代表真实免费。
 
-### Images
+### 图片
 
-Provider image URLs should map to:
+`Attraction.image_url` 是未来 enrichment 预留字段。当前 MVP 不调用 Unsplash 或其他图片服务，缺失时保持：
 
 ```python
-Attraction.image_url
+image_url = None
 ```
 
-If no image is available, keep `image_url = None`.
+## Deferred Image Enrichment
 
-## Deferred Unsplash Image Service
+图片 enrichment 当前 deferred。
 
-Unsplash/photo enrichment is deferred for the MVP.
+原因：
 
-It should not be exposed as a planner tool or called during terminal-first backend testing.
+- 行程规划不依赖图片。
+- 图片工具会增加 LLM/tool 复杂度。
+- 结果页可以先展示文本和地图。
+- `image_url` 已经作为 nullable slot 预留。
 
-Reason:
-
-- The planner does not need to decide whether images are required.
-- Keeping it outside the graph reduces LLM/tool complexity.
-- `Attraction.image_url` can remain as a nullable future slot.
-
-Future wrapper:
+未来可接入：
 
 ```python
-class UnsplashService:
-    async def search_photos(self, query: str, per_page: int = 10) -> list[dict]:
-        ...
-
+class ImageEnrichmentService:
     async def get_photo_url(self, query: str) -> str | None:
         ...
 ```
 
-Future usage:
+未来流程：
 
 ```text
 TripPlan generated
   -> for each attraction without image_url
-  -> search image by "{attraction.name} {attraction.city or day.city}"
+  -> search image by attraction name + city
   -> set image_url if found
 ```
 
-For terminal-first backend testing, image enrichment should be disabled/deferred.
+## Graph 集成
 
-## Graph Integration
-
-The tools layer is consumed by graph nodes/subgraphs:
+工具层被这些节点消费：
 
 ```text
 AttractionSearchSubgraph
-  -> local task planner
-  -> per-step ReAct executor with restricted Amap POI/detail/around/geocode tools
-  -> step evaluator and bounded retry/replan
-  -> normalize raw POIs to AttractionSearchResult
-
-WeatherQueryNode
-  -> Amap weather
-  -> normalize raw weather to WeatherInfo
+  -> AmapMCPService.search_attractions
+  -> normalized AttractionSearchResult
 
 HotelSearchSubgraph
-  -> local task planner
-  -> per-step ReAct executor with restricted Amap POI/around/geocode/direction-summary tools
-  -> step evaluator and bounded retry/replan
-  -> normalize raw POIs to HotelSearchResult
+  -> AmapMCPService.search_hotels
+  -> route summary helper
+  -> normalized HotelSearchResult
 
-Deferred post-processing
-  -> UnsplashService
-  -> enrich Attraction.image_url later
+WeatherQueryNode
+  -> AmapMCPService.weather
+  -> normalized list[WeatherInfo]
 ```
 
-Specialist subgraphs should use restricted tool access:
+Specialist 子图只拿自己需要的工具：
 
-- `AttractionSearchSubgraph` can use POI search tools.
-- `WeatherQueryNode` can use weather tools.
-- `HotelSearchSubgraph` can use POI/hotel search tools.
+- 景点子图拿景点搜索相关入口。
+- 酒店子图拿酒店搜索和路线摘要相关入口。
+- 天气节点拿天气入口。
 
-They should not receive unrelated tools.
+Planner 不直接调用工具。
 
-## Error Handling
+## 错误处理
 
-Tool failures should not crash the entire graph when a fallback is possible.
+工具失败不应该在可 fallback 时让整个 graph 崩溃。
 
-Recommended behavior:
+推荐行为：
 
-- Amap POI failure -> return empty candidates and record tool observation.
-- Weather failure -> continue with empty weather and note missing weather.
-- Photo enrichment deferred -> leave `image_url = None`.
-- Repeated tool failure in a required step -> surface structured error or fallback plan.
+- 景点搜索失败：返回空候选，记录 tool observation。
+- 酒店搜索失败：返回空候选或 best-effort selected hotel，记录 observation。
+- 天气失败：返回空 `weather_info`，记录 observation。
+- route summary 失败：route 字段保持 `None`。
+- 图片 enrichment deferred：`image_url = None`。
 
-Tool observations should be summarized before being written to working memory:
+写入 working memory 的工具观察应是简短摘要：
 
 ```text
-"Amap POI search for '历史文化' in 北京 returned 18 results; 9 retained after filtering."
+Amap 搜索北京历史文化返回 18 个 POI，保留 9 个。
 ```
 
-Do not store full raw provider responses in working memory unless needed for debugging.
+不要把完整 raw provider response 写进 working memory。
 
-## Configuration
+## 配置
 
-Expected environment variables:
+必需：
 
 ```text
 AMAP_MAPS_API_KEY=...
-UNSPLASH_ACCESS_KEY=...
-ENABLE_IMAGE_ENRICHMENT=false
 ```
 
-MCP command configuration:
+Docker Compose 覆盖：
 
 ```text
 AMAP_MCP_COMMAND=amap-mcp-server
 AMAP_MCP_ARGS=
 ```
 
-The Docker image installs `amap-mcp-server` from `requirements.txt`, so the container-safe command is simply `amap-mcp-server`. Do not store Windows-specific executable paths in `.env`.
-
-## Terminal Testing
-
-Before full graph testing, tools should be tested independently.
-
-Examples:
+可选/预留：
 
 ```text
-search attractions in 北京 with keyword "历史文化"
-query 北京 weather
-search economy hotels in 北京
-normalize a real Amap coordinate string
+ENABLE_IMAGE_ENRICHMENT=false
+UNSPLASH_ACCESS_KEY=...
 ```
 
-Then test through graph-level endpoint:
+这些图片相关配置当前不参与 MVP 主链路。
+
+## 测试建议
+
+先单独测试工具层：
+
+```text
+搜索北京历史文化景点
+查询北京天气
+搜索北京经济型酒店
+验证 maps_search_detail 是否补全坐标
+验证 maps_geo 是否在 detail 缺坐标时兜底
+验证 route summary 只返回距离、耗时、交通方式
+```
+
+再通过 graph endpoint 测试：
 
 ```http
 POST /api/trip/plan
 ```
 
-## Deferred Items
+关键检查：
 
-Not required for MVP:
+- 返回合法 `TripPlan`。
+- map points 只来自有坐标的对象。
+- 不返回完整路线说明。
+- 不暴露 raw Amap response。
+- 工具失败时 graph 可以继续或 fallback。
 
-- Calling Unsplash/photo enrichment in MVP.
-- Exposing Unsplash as an LLM-callable tool.
-- Route planning tools.
-- Multi-provider image search.
-- Production-grade rate limiting.
-- Tool-result caching.
-- Full MCP server lifecycle dashboard.
+## MVP 边界
 
-## Summary
+当前不包含：
 
-Amap should be integrated through one shared MCP server instance and consumed by the relevant LangGraph nodes/subgraphs. The tool layer should normalize provider responses into Pydantic-compatible domain models before data reaches `PlannerNode`. Photo enrichment and full route instructions are deferred for the MVP, while lightweight route summary signals may be used for ranking and planning support.
+- Unsplash/photo enrichment 主链路。
+- LLM 可直接调用图片工具。
+- 完整路线规划说明。
+- 地图 polyline。
+- 真实酒店库存。
+- 生产级 rate limiting。
+- 工具结果缓存。
+- MCP server 生命周期 dashboard。
+
+## 小结
+
+工具层的核心职责是把真实 Amap MCP 能力变成项目内部稳定模型。Amap MCP 提供外部数据，`AmapMCPService` 负责调用和归一化，specialist 子图负责局部搜索策略，Planner 只消费干净的 `Attraction`、`Hotel`、`WeatherInfo` 和 route summary。
+
+这样可以让 LLM 使用真实世界数据，同时避免 raw provider response 污染 graph state 和前端合同。

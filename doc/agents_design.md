@@ -1,61 +1,63 @@
-# Agents Design
+# Agents 设计
 
-This document describes the agents-layer design for a travel planning assistant built as a self-hosted Python web app.
+这份文档说明 ZoeyAgent 的 agents 层设计。这里的 agents 层不是多个互相独立的聊天机器人，而是一个由 LangGraph 编排的旅行规划状态机。它把一次旅行规划拆成多个节点：记忆召回、请求归一化、景点搜索、酒店搜索、天气查询、上下文组装、Planner 生成、结果校验、记忆保存和 fallback。
 
-The goal is to generate a complete, structured travel plan from a front-end form, while keeping the agents workflow understandable, testable, and easy to extend.
+设计目标很直接：让系统能从前端表单生成一个结构化、可校验、可渲染的 `TripPlan`，同时保持每个节点职责清楚、容易测试、可以继续扩展。
 
-## Background
+## 背景
 
-The product flow starts on a web page where the user enters:
+用户在前端输入：
 
-- Destination cities
-- Travel dates
-- Indexed travel preferences
-- Budget
-- Transportation preference
-- Accommodation preference
-- Extra requirements
+- 目的地城市。
+- 旅行日期。
+- 交通偏好。
+- 住宿偏好。
+- 景点偏好。
+- 预算。
+- 额外要求。
 
-After the user clicks "start planning", the backend receives this form as a structured request. The agents layer then gathers required information from external tools, uses memory for personalization, generates a travel plan, validates it, and returns a structured response that the front end can render.
+后端把这些字段接收为 `TripPlanRequest`。agents 层随后会调用真实工具、召回长期记忆、生成行程草稿、校验结果，并最终返回 `TripPlan`。
 
-The backend resolves the planning `session_id` before graph execution. If the first request omits it, the backend generates one; if it is present, the backend reuses it. The graph should always receive a non-empty resolved `session_id`, and the final `TripPlan` should return that same value.
+结果页需要展示：
 
-The result page needs enough structured data to show:
+- 行程概览。
+- 每日行程。
+- 每日地图点。
+- 酒店推荐。
+- 天气信息。
+- 餐食建议。
+- 每日价格。
+- 可编辑景点卡片。
 
-- Trip overview
-- Per-day price totals
-- Per-day attraction maps
-- Daily itinerary
-- Weather information
-- Hotel recommendation
-- Meal suggestions
-- Editable attraction cards
+因此 agents 层不能只返回自然语言文本。它必须返回 day-centric 的结构化模型。
 
-The agents layer should therefore not return loose prose. It should return a validated, day-centric `TripPlan` object.
+## 设计方向
 
-External provider access is defined in `tools_design.md`. The agents layer should consume normalized tool results, not raw Amap or Unsplash provider responses.
+系统使用一个 LangGraph 主流程，而不是多个完全独立的 Agent。
 
-## Design Direction
+早期概念里可以把系统拆成：
 
-Use one LangGraph state machine instead of several independent agents.
+- 景点搜索 Agent。
+- 天气查询 Agent。
+- 酒店搜索 Agent。
+- 行程规划 Agent。
 
-The original conceptual design had four agents:
-
-- `AttractionSearchAgent`
-- `WeatherQueryAgent`
-- `HotelAgent`
-- `PlannerAgent`
-
-This design keeps the same functional responsibilities, but implements them as LangGraph nodes or subgraphs:
+但在 Web 应用中，更适合把它们实现为共享 `TravelPlanState` 的 graph 节点或 specialist 子图：
 
 - `AttractionSearchSubgraph`
-- `WeatherQueryNode`
 - `HotelSearchSubgraph`
+- `WeatherQueryNode`
+- `ContextAssemblyNode`
 - `PlannerNode`
+- `ValidateTripPlanNode`
+- `SaveMemoryNode`
+- `FallbackNode`
 
-This is a better fit because LangGraph models the workflow as shared state plus directed edges. Each node reads from and writes to the same `TravelPlanState`, and Pydantic models define the shape of the data moving through the graph.
+这样每一步的输入输出都能被 Pydantic 模型约束，graph 执行也更容易观察和测试。
 
-## Core Architecture
+## 主流程
+
+当前实现的主流程如下：
 
 ```mermaid
 flowchart TD
@@ -63,44 +65,36 @@ flowchart TD
     B --> C["LoadMemoryNode"]
     C --> D["NormalizeRequestNode"]
     D --> E["AttractionSearchSubgraph"]
-    D --> F["WeatherQueryNode"]
-    E --> G["HotelSearchSubgraph"]
-    E --> H["WorkingMemoryMaintenanceNode"]
-    F --> H
-    G --> H
-    H --> I["ContextAssemblyNode"]
-    I --> J["PlannerNode"]
-    J --> K["ValidateTripPlanNode"]
-    K -->|valid| L["SaveMemoryNode"]
-    K -->|invalid and retry < max| H
-    K -->|invalid and retry >= max| M["FallbackNode"]
-    L --> N["END / TripPlan"]
-    M --> N
+    E --> F["HotelSearchSubgraph"]
+    F --> G["WeatherQueryNode"]
+    G --> H["ContextAssemblyNode"]
+    H --> I["PlannerNode"]
+    I --> J["ValidateTripPlanNode"]
+    J -->|valid| K["SaveMemoryNode"]
+    J -->|repair| I
+    J -->|fallback| L["FallbackNode"]
+    K --> M["END / TripPlan"]
+    L --> M
 ```
 
-`WorkingMemoryMaintenanceNode` is shown as a conceptual checkpoint before context assembly. In implementation, working memory maintenance should primarily be enforced by helper functions around state updates, such as `maintain_working_messages(...)` and `maintain_tool_observations(...)`. The conceptual node remains in the diagram to make the context hygiene boundary visible before `PlannerNode`.
+需要注意两点：
 
-## Why Hotel Search Depends on Attraction Search
+1. 当前代码中 validation repair 会直接回到 `PlannerNode`，复用 state 中已有的 `planner_context` 和 `validation_errors`。后续如果要让 repair 重新组装上下文，可以再把 repair 边改回 `ContextAssemblyNode`。
+2. `WorkingMemoryMaintenanceNode` 在总体架构图中是一个概念边界。实际代码主要通过 `maintain_working_messages(...)` 和 `maintain_tool_observations(...)` 这类 helper 在追加 state 时维护 working memory。
 
-Hotel recommendations should consider where the user will actually spend time.
+## 为什么酒店搜索依赖景点搜索
 
-The hotel node needs:
+酒店推荐不能只看城市名。一个好的酒店候选应该靠近用户真正会活动的区域，例如主要景点、购物区、晚餐区域或交通方便的位置。
 
-- Main attraction locations
-- Preferred transportation
-- Accommodation type
-- Budget
-- Distance to major itinerary areas
+因此 `HotelSearchSubgraph` 在 `AttractionSearchSubgraph` 之后运行。它可以使用景点候选作为 anchor，再结合预算、交通偏好和住宿偏好搜索酒店。
 
-For that reason, `HotelSearchSubgraph` runs after `AttractionSearchSubgraph`, rather than fully in parallel with it.
+天气查询只依赖城市，因此理论上可以和搜索并行。但当前实现为了主流程简单，放在酒店搜索之后执行。
 
-Weather lookup can still run in parallel with attraction search because it only depends on destination cities and dates.
+## TravelPlanState
 
-## State Design
+LangGraph 节点通过共享 state 协作。这个 state 不是随意 dict，而是由 `TravelPlanState` 约束字段形状。
 
-LangGraph passes a shared state through the workflow. The state stores the original request, normalized request, memory results, tool results, generated plan, and validation status.
-
-Representative shape:
+代表性字段如下：
 
 ```python
 class TravelPlanState(TypedDict):
@@ -120,701 +114,443 @@ class TravelPlanState(TypedDict):
 
     attraction_search_result: AttractionSearchResult
     attractions: list[Attraction]
-    weather_info: list[WeatherInfo]
     hotel_search_result: HotelSearchResult
     hotels: list[Hotel]
+    weather_info: list[WeatherInfo]
 
     trip_plan: TripPlan | None
     validation_errors: list[str]
     retry_count: int
 ```
 
-`attractions` and `hotels` are convenience flattened views derived from the richer subgraph results. The richer `AttractionSearchResult` and `HotelSearchResult` preserve step observations, quality checks, selected hotel, candidate hotels, and ranking reasons.
+`attractions` 和 `hotels` 是便捷的扁平视图。更完整的搜索过程、候选质量和排序理由保存在 `AttractionSearchResult` 和 `HotelSearchResult` 中。
 
-## Pydantic Role
+## Pydantic 的作用
 
-Pydantic is used at three levels:
+Pydantic 在 agents 层有三类用途：
 
-1. FastAPI request and response validation
-2. LangGraph node input/output contracts
-3. LLM structured output validation
+1. API 输入输出校验。
+2. graph state 和节点输出合同。
+3. LLM structured output 校验。
 
-Important models:
+关键模型包括：
 
 - `TripPlanRequest`
 - `NormalizedTripRequest`
-- `Location`
 - `Attraction`
 - `Hotel`
 - `Meal`
 - `WeatherInfo`
 - `DayPlan`
 - `TripPlan`
+- `AttractionSearchResult`
+- `HotelSearchResult`
+- `SearchQuality`
+- `MemoryCandidate`
 
-The front end and backend should share the same conceptual data shape. The backend returns a validated `TripPlan`, and the front end renders that directly into overview cards, per-day maps, daily itinerary sections, weather blocks, and per-day price totals.
+这样做的好处是：LLM 可以生成内容，但不能随意改变前端合同；工具可以返回真实数据，但必须先归一化成项目内部模型。
 
-## Node Responsibilities
+## 节点职责
+
+### InitializeWorkingState
+
+用途：初始化当前 graph run 的运行现场。
+
+输入：
+
+- `TripPlanRequest`
+
+输出：
+
+- 初始化后的 working state。
+
+职责：
+
+- 写入原始请求。
+- 初始化 `working_messages`。
+- 初始化 `tool_observations`。
+- 初始化 `memory_candidates`、`context_packets`、`validation_errors` 和 `retry_count`。
+- 不调用外部工具。
+- 不写长期记忆。
 
 ### LoadMemoryNode
 
-Purpose: load personalization context.
+用途：在规划前召回个性化上下文。
 
-Input:
+输入：
 
 - `user_id`
 - `TripPlanRequest`
 
-Output:
+输出：
 
 - `semantic_memories`
 - `episodic_memories`
 
-Responsibilities:
+职责：
 
-- Retrieve long-term travel preferences from semantic memory.
-- Retrieve related historical travel decisions from episodic memory.
-- Provide context such as preferred travel pace, hotel preferences, rejected options, and previously confirmed choices.
-- Use `PostgresStore.search(...)` for semantic recall over long-term memory. The store embeds the query with `bge-m3` through the configured local embedding API; the MVP uses Ollama `/api/embed` and Postgres `pgvector`.
+- 从 semantic memory 中召回稳定偏好。
+- 从 episodic memory 中召回历史决策。
+- 使用 `PostgresStore.search(...)`。
+- 通过本地 embedding provider 和 pgvector 做语义检索。
+- 如果长期记忆未启用，返回空列表并让 graph 继续执行。
 
 ### NormalizeRequestNode
 
-Purpose: convert raw user input into a normalized planning request.
+用途：把前端原始输入转换成 graph 更容易消费的内部请求。
 
-Input:
+输入：
 
 - `TripPlanRequest`
-- `semantic_memories`
-- `episodic_memories`
 
-Output:
+输出：
 
 - `NormalizedTripRequest`
 
-Responsibilities:
+职责：
 
-- Validate date range and trip length.
-- Normalize budget and convert frontend enum indexes into English enum values for transportation, accommodation, and attraction preferences.
-- Validate `cities` as a non-empty list of city strings.
-- Merge explicit request fields with known user preferences.
-- Identify missing or ambiguous planning inputs.
-- Preserve long `extra_requirements`, but provide shorter task-specific excerpts to local subgraphs when possible.
-- Preserve provider-returned text fields such as `city`, `name`, `address`, and `description` as-is.
-
-### WorkingMemoryMaintenanceNode
-
-Purpose: keep active working memory bounded and promote important overflow content before it is dropped.
-
-Input:
-
-- `working_messages`
-- `trip_draft`
-- `tool_observations`
-- Existing semantic and episodic memories
-
-Output:
-
-- Updated `working_messages`
-- Optional `memory_candidates`
-- Optional semantic/episodic memory candidates through `MemoryExtractionService`
-
-Responsibilities:
-
-- Conceptually verify that working memory is bounded before `ContextAssemblyNode`.
-- In implementation, enforce the same policy through state-update helpers such as `maintain_working_messages(...)` and `maintain_tool_observations(...)`.
-- If `working_messages` exceeds 50 messages, take the oldest overflow messages.
-- Use `MemoryExtractionService` to extract semantic/episodic candidates from the overflow messages.
-- Deduplicate approved long-term candidates into `memory_candidates`; durable writes are handled by `SaveMemoryNode` after a valid plan.
-- Remove overflow messages from `working_messages` after extraction.
-
-This node does not summarize working memory and does not search working memory with BM25, TF-IDF, embeddings, or `pgvector`. Working memory remains checkpointed graph state loaded by `thread_id`.
-
-Implementation policy:
-
-```text
-maintain_working_messages(state, message)
-  -> append message
-  -> if len(working_messages) > 50:
-       overflow = oldest messages beyond the 50-message limit
-       MemoryExtractionService extracts semantic/episodic candidates
-       approved candidates are kept in memory_candidates
-       working_messages keeps only the latest 50 messages
-```
-
-This makes working memory maintenance a reusable helper policy rather than a planning step that every graph branch must explicitly call.
+- 校验日期范围和旅行天数。
+- 把前端 enum index 转成英文值。
+- 保留中文城市名，例如 `杭州`。
+- 保留 `budget` 和 `extra_requirements`。
+- 确保 `session_id` 是 resolved non-empty value。
+- 不调用外部工具。
 
 ### AttractionSearchSubgraph
 
-Purpose: find suitable attractions through a local Plan-and-Solve workflow.
+用途：搜索和筛选景点候选。
 
-Input:
+这是 bounded ReAct 风格的 specialist 子图。它有自己的 local scratchpad，但不直接写长期记忆，也不生成最终 `TripPlan`。
 
-- Cities
-- Attraction preferences
-- Extra requirements
-- Trip length
+输入：
 
-Output:
+- 城市。
+- 景点偏好。
+- 日期数量。
+- 额外要求。
+- 相关记忆摘要。
+
+输出：
 
 - `AttractionSearchResult`
+- 扁平 `attractions`
+- 简短 `tool_observations`
 
-Responsibilities:
-
-- Create a local attraction-search plan before calling tools.
-- Break attraction search into smaller tasks such as keyword generation, POI search, nearby expansion, detail enrichment, quality evaluation, and ranking.
-- Use bounded ReAct executors for tool-heavy subtasks.
-- Call Amap POI/search-detail/around-search tools through the shared Amap MCP integration defined in `tools_design.md`.
-- Evaluate each step before moving forward.
-- Replan with alternate keywords, nearby anchors, or wider search scope when results are too few or too weak.
-- Merge, deduplicate, and rank attraction candidates.
-- Return normalized `Attraction` candidates and a summarized observation to `TravelPlanState`.
-
-Internal workflow:
-
-```text
-AttractionTaskPlannerNode
-  -> AttractionReActStepExecutorNode
-  -> AttractionStepEvaluatorNode
-  -> if invalid: replan/refine and retry
-  -> if valid and more steps: execute next step
-  -> AttractionRankerNode
-  -> AttractionSearchResult
-```
-
-Diagram:
+内部流程：
 
 ```mermaid
 flowchart TD
-    AStart["AttractionSearchSubgraph input"] --> APlan["AttractionTaskPlannerNode"]
-    APlan --> AStep["Select next attraction search step"]
-    AStep --> AExec["AttractionReActStepExecutorNode"]
-    AExec --> ATool["Restricted Amap tools"]
-    ATool --> ANorm["Normalize partial POI results"]
-    ANorm --> AEval["AttractionStepEvaluatorNode"]
-    AEval --> AValid{"Step valid?"}
-    AValid -->|No| ARepair["Refine keywords anchors or scope"]
-    ARepair --> AExec
-    AValid -->|Yes| AMore{"More planned steps?"}
-    AMore -->|Yes| AStep
-    AMore -->|No| ARank["AttractionRankerNode"]
-    ARank --> AResult["AttractionSearchResult"]
-    AResult --> AState["Write summarized observation to TravelPlanState"]
-
-    classDef plan fill:#ffe3e3,stroke:#c92a2a,color:#222;
-    classDef exec fill:#ffe8cc,stroke:#d9480f,color:#222;
-    classDef eval fill:#e5dbff,stroke:#5f3dc4,color:#222;
-    classDef output fill:#c5f6fa,stroke:#0c8599,color:#222;
-    classDef state fill:#fff4e6,stroke:#e67700,color:#222;
-
-    class APlan,AStep,ARepair plan;
-    class AExec,ATool,ANorm exec;
-    class AEval,AValid,AMore eval;
-    class ARank,AResult output;
-    class AState state;
+    A["AttractionSearchSubgraph input"] --> B["LLM local plan"]
+    B --> C["LLM restricted action"]
+    C --> D["AmapMCPService.search_attractions"]
+    D --> E["Normalize POI to Attraction"]
+    E --> F["Evaluate SearchQuality"]
+    F --> G{"Enough quality?"}
+    G -->|No and retry left| C
+    G -->|Yes or exhausted| H["Rank and deduplicate"]
+    H --> I["AttractionSearchResult"]
+    I --> J["Write result and observation to TravelPlanState"]
 ```
 
-Example local plan:
+允许的工具入口：
 
 ```text
-1. Convert user attraction preferences into English enum intent and provider search keywords.
-2. Search primary POIs for each city.
-3. If result quality is low, retry with alternate keywords such as museums, historic sites, parks, food streets, shopping districts, art districts, or leisure areas.
-4. Enrich important candidates with POI detail or around-search when useful.
-5. Rank by preference match, coordinate completeness, rating, estimated visit value, and itinerary diversity.
+AmapMCPService.search_attractions(...)
 ```
 
-Each executable step can use a controlled ReAct loop:
+service 内部可使用：
 
 ```text
-Plan step
-  -> choose restricted Amap tool
-  -> call tool
-  -> observe result
-  -> normalize partial output
-  -> evaluate step validity
-  -> retry/replan within max retries when invalid
+maps_text_search
+maps_search_detail
+maps_geo
 ```
 
-This subgraph is agentic inside a narrow boundary. It can plan, execute, evaluate, and replan locally, but it does not own the final itinerary or write long-term memory directly.
+职责：
 
-Local context:
-
-`AttractionSearchSubgraph` should use a local prompt/context scope, not the full planner context. It can receive only:
-
-- Cities or the current city being searched
-- Preferences
-- Extra requirements
-- Relevant attraction-related semantic memories
-- Relevant attraction-related episodic memories
-- Previous attraction search attempts
-- Current result quality
-
-It should not receive full hotel details, full weather reports, the complete TripPlan schema, or all working messages.
-
-### WeatherQueryNode
-
-Purpose: get weather for the trip dates.
-
-Input:
-
-- Cities
-- Start date
-- End date
-
-Output:
-
-- `list[WeatherInfo]`
-
-Responsibilities:
-
-- Call the Amap weather tool through the shared Amap MCP integration defined in `tools_design.md`.
-- Query weather per destination city when the request contains multiple cities.
-- Normalize API response into `WeatherInfo`, including the city for each weather record.
-- Convert temperature strings into integers when needed.
-
-This node does not need an LLM or ReAct loop.
+- 让 LLM 生成局部搜索计划。
+- 让 LLM 在每轮选择受限 action。
+- 通过 Amap service 调真实 MCP 工具。
+- 对 POI 做坐标补全、归一化、去重和排序。
+- 用 `SearchQuality` 判断是否 retry。
+- 返回 best-effort 结果，而不是让整个 graph 卡死。
 
 ### HotelSearchSubgraph
 
-Purpose: find suitable hotels through a local Plan-and-Solve workflow.
+用途：基于景点 anchor、预算、交通方式和住宿偏好搜索酒店候选。
 
-Input:
+它同样是 bounded ReAct 风格的 specialist 子图。Amap POI 只能提供候选酒店，不能确认真实房态或实时价格。
 
-- Cities
-- Accommodation preferences
-- Budget
-- Transportation preference
-- Attractions
+输入：
 
-Output:
+- 城市。
+- 景点候选。
+- 住宿偏好。
+- 交通偏好。
+- 预算。
+- 相关记忆摘要。
+
+输出：
 
 - `HotelSearchResult`
+- 扁平 `hotels`
+- selected hotel
+- 简短 `tool_observations`
 
-Responsibilities:
-
-- Create a local hotel-search plan before calling tools.
-- Search around itinerary anchors such as selected attractions, dinner areas, transport-convenient spots, business districts, or transit hubs.
-- Use Amap tools through the shared Amap MCP integration.
-- Filter and rank by distance, price, rating, hotel level, transportation convenience, and parking suitability.
-- Use lightweight direction-tool summaries when useful: distance, estimated time, and transport mode only.
-- Treat parking as high-priority when `transport_preference = driving`; check hotel parking evidence or nearby parking lots when possible.
-- Check whether the hotel can logically fit the itinerary stay period. True availability requires a future booking provider; Amap POI alone should produce `candidate_hotels`, not guaranteed available rooms.
-- Recommend a top hotel while preserving other qualified candidates in working memory / tool observations.
-- Return normalized hotel candidates, selected hotel, ranking reasons, and a summarized observation to `TravelPlanState`.
-
-Internal workflow:
-
-```text
-HotelTaskPlannerNode
-  -> HotelReActStepExecutorNode
-  -> HotelStepEvaluatorNode
-  -> if invalid: replan/refine and retry
-  -> if valid and more steps: execute next step
-  -> HotelRankerNode
-  -> HotelMemoryCandidateNode
-  -> HotelSearchResult
-```
-
-Diagram:
+内部流程：
 
 ```mermaid
 flowchart TD
-    HStart["HotelSearchSubgraph input"] --> HPlan["HotelTaskPlannerNode"]
-    HPlan --> HAnchor["Choose search anchor"]
-    HAnchor --> HExec["HotelReActStepExecutorNode"]
-    HExec --> HTools["Restricted Amap tools"]
-    HTools --> HNorm["Normalize hotel candidates"]
-    HNorm --> HEval["HotelStepEvaluatorNode"]
-    HEval --> HValid{"Step valid?"}
-    HValid -->|No| HRepair["Increase radius switch anchor or add keyword"]
-    HRepair --> HExec
-    HValid -->|Yes| HMore{"More planned steps?"}
-    HMore -->|Yes| HAnchor
-    HMore -->|No| HRank["HotelRankerNode"]
-    HRank --> HMemory["HotelMemoryCandidateNode"]
-    HMemory --> HResult["HotelSearchResult"]
-    HResult --> HState["Write selected hotel candidates and observations to TravelPlanState"]
-
-    classDef plan fill:#ffe3e3,stroke:#c92a2a,color:#222;
-    classDef exec fill:#ffe8cc,stroke:#d9480f,color:#222;
-    classDef eval fill:#e5dbff,stroke:#5f3dc4,color:#222;
-    classDef memory fill:#fff4e6,stroke:#e67700,color:#222;
-    classDef output fill:#c5f6fa,stroke:#0c8599,color:#222;
-
-    class HPlan,HAnchor,HRepair plan;
-    class HExec,HTools,HNorm exec;
-    class HEval,HValid,HMore eval;
-    class HMemory,HState memory;
-    class HRank,HResult output;
+    A["HotelSearchSubgraph input"] --> B["LLM local hotel plan"]
+    B --> C["Choose anchor or search area"]
+    C --> D["LLM restricted action"]
+    D --> E["AmapMCPService.search_hotels"]
+    E --> F["Optional route summary"]
+    F --> G["Evaluate SearchQuality"]
+    G --> H{"Enough quality?"}
+    H -->|No and retry left| C
+    H -->|Yes or exhausted| I["Rank candidates and select hotel"]
+    I --> J["HotelSearchResult"]
 ```
 
-Example local plan:
+可能使用的 service 能力：
 
 ```text
-1. Choose hotel search anchors from attractions, dinner areas, or transport-convenient areas.
-2. Search hotels near anchors and aim for about 10 viable candidates per relevant city/area.
-3. Score candidates by distance, estimated travel time, transport mode, price, rating, hotel level, transit convenience, and parking suitability.
-4. Check whether the stay date range fits the itinerary structure. If a real availability API is absent, mark candidates as POI candidates rather than confirmed availability.
-5. Select top 1 hotel for planning and keep other qualified candidates as working-memory/tool-observation candidates.
+AmapMCPService.search_hotels(...)
+AmapMCPService.route_summary(...)
 ```
 
-Example step-level ReAct/evaluator loop for hotel radius search:
+service 内部可使用：
 
 ```text
-Executor:
-  -> use geocode / known attraction coordinates
-  -> choose search radius
-  -> call around-search or text-search
-  -> optionally call direction tool for summary distance time and mode
-  -> normalize hotels
-
-Evaluator:
-  -> valid if enough hotels, locations are present, distance is computable, and required driving/parking checks were attempted
-  -> invalid if too few candidates, hotels are too far, parking evidence is missing for driving trips, or candidate data is too sparse
-
-Repair:
-  -> increase radius
-  -> switch anchor
-  -> add business district / transit hub keyword
-  -> retry within max retries
+maps_text_search
+maps_search_detail
+maps_geo
+maps_direction_walking_by_address
+maps_direction_driving_by_address
+maps_direction_transit_integrated_by_address
 ```
 
-Local context:
+职责：
 
-`HotelSearchSubgraph` should use a local prompt/context scope. It can receive only:
+- 基于景点 cluster 或商圈选择酒店搜索 anchor。
+- 搜索住宿类 POI。
+- 过滤明显不是酒店的结果。
+- 根据评分、位置、交通方式、预算和距离做排序。
+- 自驾场景下关注停车便利性线索。
+- 输出 candidate hotels，而不是 guaranteed available rooms。
 
-- Cities or the current city/area being searched
-- Accommodation preference
-- Budget
-- Transportation preference
-- Selected attraction clusters
-- Relevant hotel-related semantic memories
-- Relevant hotel-related episodic memories
-- Previous hotel search attempts
+### WeatherQueryNode
 
-It should not receive full conversation history, full attraction descriptions, meal suggestions, or the full TripPlan schema.
+用途：查询天气。
 
-Memory policy:
+输入：
 
-- Keep selected hotel and candidate hotels in working memory / tool observations for the current graph run.
-- Do not write every hotel candidate directly to semantic or episodic memory.
-- Long-term memory writes happen through `MemoryExtractionService`, usually after successful validation in `SaveMemoryNode`.
-- Semantic memory is appropriate for stable preferences such as "user prefers hotels with parking".
-- Episodic memory is appropriate for confirmed or rejected trip decisions such as "for this Beijing trip, hotel A was selected and hotel B was rejected".
+- 城市。
+- 日期范围。
 
-## Specialist Subgraph Pattern
+输出：
 
-`AttractionSearchSubgraph` and `HotelSearchSubgraph` should be treated as local Plan-and-Solve specialist subgraphs. They are not fully independent open-ended agents, but they are allowed to plan, execute, evaluate, and repair their own narrow search tasks.
+- `list[WeatherInfo]`
 
-Shared pattern:
+职责：
 
-```text
-SpecialistSearchSubgraph
-  -> local input schema
-  -> local task planner
-  -> restricted tool set
-  -> per-step ReAct executor
-  -> per-step evaluator
-  -> bounded retry/replan loop
-  -> rank/deduplicate
-  -> memory candidate preparation for working memory
-  -> Pydantic output schema
-  -> summarized observation back to TravelPlanState
-```
+- 调用 `maps_weather`。
+- 归一化天气、温度、风向和风力。
+- 如果 provider 只返回近期天气，不伪造远期天气。
+- 工具失败时记录 observation，并让 graph 继续执行。
 
-The main graph remains the global Plan-and-Solve controller. Specialist subgraphs are allowed to reason iteratively within their narrow domain, but they should not own final itinerary synthesis or direct long-term memory writes.
-
-Implementation should use a shared methodology with domain-specific local implementations. This avoids duplicated behavior rules without forcing attraction and hotel search into one universal runner or config schema.
-
-Reusable pieces:
-
-- `ContextAssembler`
-- `PromptTemplateRegistry`
-- `BaseLLMNode`
-- `BaseReActStepExecutor`
-- retry policy
-- step observation format
-- `SearchQuality`
-- working-memory write helpers
-- subgraph result write-back helpers
-
-Domain-specific pieces:
-
-- task planner prompt
-- step executor prompt
-- evaluator rules or evaluator prompt
-- ranking policy
-- allowed tools
-- output schema
-- memory candidate rules
-
-The attraction and hotel subgraphs should use the same structure with domain-specific prompts, tools, evaluator rules, ranking policy, and output schema. Shared code should live in small interfaces and helpers such as context builders, retry policy, observation formatting, and result write-back, while the domain-specific ReAct loops remain inside their own subgraph modules.
-
-Recommended internal state for each specialist subgraph:
-
-```text
-local_goal
-local_plan
-current_step
-step_attempts
-tool_observations
-partial_candidates
-quality_checks
-retry_count
-final_result
-```
-
-Each subgraph should have explicit max retry limits. If a step cannot be made valid, the subgraph should return the best available candidates plus structured quality warnings instead of blocking the whole trip planner indefinitely.
-
-## Context Assembly Design
-
-Context assembly has two layers:
-
-- `ContextAssemblyNode`: the explicit main-graph node used before `PlannerNode`.
-- `ContextAssembler`: a reusable class/service used inside every LLM node, including specialist subgraph LLM nodes.
-
-Core rule:
-
-```text
-Every LLM node
-  -> ContextAssembler
-  -> PromptTemplate
-  -> LLM call
-  -> Structured output validation
-  -> State update
-```
-
-Deterministic or rule-only nodes do not need `ContextAssembler`. Examples:
-
-- `WeatherQueryNode`
-- pure rule `StepEvaluatorNode`
-- pure tool normalization nodes
+这个节点不需要 LLM，也不需要 ReAct。
 
 ### ContextAssemblyNode
 
-Purpose: build the optimized planner context immediately before `PlannerNode`.
+用途：在 Planner 前构建高质量上下文。
 
-Input:
+输入：
 
-- `TripPlanRequest`
-- `NormalizedTripRequest`, including original city strings and English preference enum values
-- Working memory
-- Trip draft
-- Tool observations
-- Semantic memories
-- Episodic memories
-- Attractions
-- Weather
-- Hotels
-- Validation errors during repair loops
+- 原始请求。
+- 归一化请求。
+- working memory。
+- tool observations。
+- semantic memories。
+- episodic memories。
+- 景点结果。
+- 酒店结果。
+- 天气结果。
+- validation errors，如果是 repair 轮次。
 
-Output:
+输出：
 
 - `context_packets`
 - `planner_context`
 
-Responsibilities:
-
-- Gather candidate context from graph state.
-- Score optional context packets.
-- Select the highest-value packets under the token budget.
-- Structure the planner prompt into stable sections.
-- Compress lower-priority sections only when needed.
-
-`ContextAssemblyNode` implements a GSSC pipeline:
+它执行 GSSC：
 
 ```text
 Gather -> Select -> Structure -> Compress
 ```
 
-Recommended sections:
+推荐 sections：
 
 ```text
 [Role & Planning Rules]
 [User Request]
 [Known User Preferences]
 [Relevant Past Decisions]
-[Current Trip Draft]
 [Attraction Candidates]
-[Weather]
 [Hotel Candidates]
-[Validation Errors]  # only on repair
-[Output Schema]
+[Weather]
+[Tool Observations]
+[Validation Errors]
+[Output Contract]
 ```
-
-This explicit node is mainly for the main planner path. Specialist subgraphs should not draw a separate `ContextAssemblyNode` before every sub-node. Instead, their LLM nodes should call the reusable `ContextAssembler` internally with a local context profile and prompt template.
-
-### ContextAssembler
-
-Purpose: reusable context engineering service for all LLM nodes.
-
-It implements the same GSSC mechanism as `ContextAssemblyNode`, but with node-specific context profiles and prompt templates.
-
-Example profiles:
-
-```text
-global_planner
-attraction_task_planner
-attraction_step_executor
-attraction_step_evaluator
-hotel_task_planner
-hotel_step_executor
-hotel_step_evaluator
-repair_replan
-```
-
-Each LLM node configures:
-
-- `context_profile`
-- `prompt_template`
-- `output_schema`
-- `allowed_tools`
-
-Specialist subgraph examples:
-
-- `AttractionTaskPlannerNode` uses `ContextAssembler(profile="attraction_task_planner")`.
-- `AttractionReActStepExecutorNode` uses `ContextAssembler(profile="attraction_step_executor")`.
-- `HotelTaskPlannerNode` uses `ContextAssembler(profile="hotel_task_planner")`.
-- `HotelReActStepExecutorNode` uses `ContextAssembler(profile="hotel_step_executor")`.
-- If a step evaluator is LLM-based, it uses the matching evaluator profile.
-- If a step evaluator is pure rules, it does not call the LLM and does not need `ContextAssembler`.
-
-LangGraph fit:
-
-- `ContextAssembler` does not need to be a LangGraph node.
-- LangGraph nodes can be implemented as callables/classes that receive state and return state updates.
-- A node can internally call `ContextAssembler`, a prompt template, an LLM, and an output validator before returning its state update.
-- A compiled specialist subgraph can still be attached to the parent graph; if its local state differs from parent state, use a wrapper node to map state in and out.
-
-Memory scoring:
-
-```text
-semantic_score = relevance * 0.65 + confidence * 0.25 + recency * 0.10
-
-episodic_score = relevance * 0.50 + recency * 0.25 + importance * 0.20 + trip_match * 0.05
-```
-
-Compression is prompt-time only. It should not create persistent session summaries. It should compress or trim low-priority context such as old working messages, low-score episodic memories, large tool observations, or oversized candidate lists.
 
 ### PlannerNode
 
-Purpose: generate the complete travel plan.
+用途：生成 `TripPlan` 草稿。
 
-Input:
+输入：
 
 - `NormalizedTripRequest`
-- `semantic_memories`
-- `episodic_memories`
-- `AttractionSearchResult`
-- `list[WeatherInfo]`
-- `HotelSearchResult`
 - `planner_context`
+- 景点、酒店、天气和记忆上下文。
 
-Output:
+输出：
 
-- Draft `TripPlan`
+- draft `TripPlan`
 
-Responsibilities:
+职责：
 
-- Arrange attractions across days.
-- Consider weather, pace, transportation, budget, and user preferences.
-- Include hotel and meal suggestions.
-- Generate exactly three meal objects for each day: one `breakfast`, one `lunch`, and one `dinner`.
-- Place map markers in `DayPlan.map_points`, derived from that day's attractions, hotel, and meals after coordinate enrichment.
-- Do not create `MapPoint` entries for objects without valid coordinates; those objects can remain in `attractions`, `hotel`, or `meals`, but they are not map-renderable.
-- Leave `Attraction.image_url` unset unless a future photo enrichment service is enabled; photo links are deferred for MVP day-trip output.
-- Use route summary fields such as `route_distance_km`, `route_duration_minutes`, and `transit_method` when available from subgraph summaries.
-- Do not return full route instructions such as bus line, station count, transfer detail, or turn-by-turn directions.
-- Compute `DayPlan.total_price` for each day. The frontend calculates trip-level total by summing daily totals.
-- Generate daily descriptions and overall suggestions.
-- Return structured output matching the `TripPlan` schema.
-- Use the structured `planner_context` assembled by `ContextAssemblyNode`.
-
-This is the main LLM reasoning node.
+- 安排每日景点。
+- 选择酒店。
+- 使用天气和交通偏好调整节奏。
+- 生成 day-centric `DayPlan`。
+- 生成 `map_points`。
+- 填充 `total_price`。
+- 使用 `route_distance_km`、`route_duration_minutes`、`transit_method` 这类路线摘要。
+- 不输出完整路线说明或 raw provider response。
+- 餐食能力当前 deferred，不应为了凑三餐编造真实餐厅。
 
 ### ValidateTripPlanNode
 
-Purpose: ensure the generated plan is structurally valid.
+用途：保证最终出 API 的结果满足业务合同。
 
-Input:
+输入：
 
-- Draft `TripPlan`
+- draft `TripPlan`
 
-Output:
+输出：
 
-- Validated `TripPlan`, or validation errors
+- valid `TripPlan`，或 validation errors。
 
-Responsibilities:
+职责：
 
-- Validate the LLM output with Pydantic.
-- Ensure required fields are present.
-- Ensure dates, days, weather entries, daily map points, daily totals, and nested models are coherent.
-- Do not require three meals per day in the current MVP; meal planning is deferred.
-- Ensure every day has `total_price >= 0`.
-- Do not require top-level `budget` or top-level `map_points`; these are intentionally not part of the response contract.
-- Ensure enum-like schema fields use English values.
-- Ensure provider-returned text fields are not translated or normalized away.
-- Route back to `PlannerNode` for repair if validation fails and retry count is below the limit.
+- 用 Pydantic 校验 `TripPlan`。
+- 校验日期数量和 `day_index`。
+- 校验每日 `total_price >= 0`。
+- 校验 `map_points.day_index` 不冲突。
+- 校验不出现 top-level `budget` 或 top-level `map_points`。
+- 校验不输出完整路线说明。
+- 当前不强制每日三餐。
+- 如果失败且 retry 未超限，路由回 `PlannerNode`。
+- 如果 retry 超限，路由到 `FallbackNode`。
 
 ### SaveMemoryNode
 
-Purpose: extract and persist useful long-term memory after a successful, validated plan.
+用途：在有效计划生成后保存长期记忆。
 
-Input:
+输入：
 
-- `TripPlanRequest`
-- Final `TripPlan`
-- Working memory / graph state
-- Existing semantic and episodic memories
+- 原始请求。
+- 归一化请求。
+- working memory。
+- tool observations。
+- 最终 valid `TripPlan`。
+- 已有 semantic/episodic memories。
 
-Output:
+输出：
 
-- Memory write status
+- memory write status。
 
-Responsibilities:
+职责：
 
-- Read the current graph state, including working messages, trip draft, tool observations, and final plan.
-- Extract memory candidates from the completed planning session.
-- Classify candidates as semantic memory, episodic memory, or discard.
-- Save stable user preferences and reusable facts to semantic memory.
-- Save confirmed, rejected, or modified travel decisions to episodic memory.
-- Deduplicate against existing long-term memories before writing.
-- Use `PostgresStore.put(...)` for long-term memory writes. The store indexes the configured `text` field with Postgres `pgvector` by embedding it with local `bge-m3`; the MVP provider is Ollama.
-- Avoid saving transient working memory unless it has long-term value.
-
-Implementation note:
-
-`SaveMemoryNode` should reuse the same `MemoryExtractionService` as `WorkingMemoryMaintenanceNode`. The shared service handles extraction, classification, deduplication, and writes. The nodes differ only in trigger and input scope:
-
-- `WorkingMemoryMaintenanceNode`: triggered by overflow and processes old working messages.
-- `SaveMemoryNode`: triggered after successful validation and processes the completed graph state plus final `TripPlan`.
-
-Promotion rules:
-
-- Stable preference or reusable fact -> semantic memory.
-- Concrete event, confirmation, rejection, or modification -> episodic memory.
-- Temporary detail, duplicate, or low-value chat content -> discard.
-
-`SaveMemoryNode` should only run after `ValidateTripPlanNode` succeeds. This prevents invalid or incomplete plan data from being written into long-term memory.
+- 调用 `MemoryExtractionService`。
+- 抽取 `MemoryCandidate`。
+- 分类为 semantic、episodic 或 discard。
+- 去重。
+- 在长期记忆开启时写入 `PostgresStore`。
+- 只在 `ValidateTripPlanNode` 成功后运行。
 
 ### FallbackNode
 
-Purpose: provide a safe response after repeated validation failure.
+用途：在 Planner 多次 repair 失败后返回保守可控结果。
 
-Input:
+输入：
 
-- Validation errors
-- Existing search results
-- Original request
+- 原始请求。
+- 已有景点、酒店、天气候选。
+- validation errors。
 
-Output:
+输出：
 
-- Conservative `TripPlan` or error response
+- fallback `TripPlan`。
 
-Responsibilities:
+职责：
 
-- Avoid infinite retry loops.
-- Return a useful fallback when possible.
-- Surface clear failure information when a valid plan cannot be generated.
+- 避免无限 retry。
+- 基于已有候选拼出可渲染计划。
+- 不输出 raw provider response。
+- 尽量满足 `TripPlan` 合同。
+
+## Specialist 子图共同约束
+
+景点和酒店子图都遵守同一套边界：
+
+- 它们是 bounded ReAct 风格。
+- 它们有自己的 local scratchpad。
+- 它们通过 `SpecialistContextBuilder` 构造局部 LLM messages。
+- 它们可以共用 `LLMService`，但不共享 LLM 对话历史。
+- 它们只能调用项目内部 service，不直接调用 raw MCP。
+- 它们不生成最终 `TripPlan`。
+- 它们不直接写长期记忆。
+- 它们写回主 state 的只有结构化结果和简短 observation。
+
+推荐 local state：
+
+```text
+local_plan
+attempted_keywords
+local_observations
+partial_candidates
+quality
+retry_count
+```
+
+如果搜索质量一直不足，子图应该返回 best-effort 结果和 quality warning，而不是阻塞整条规划链路。
+
+## Context Assembly 设计
+
+上下文组装有两层：
+
+- `ContextAssemblyNode`：主 graph 中 Planner 前的显式节点。
+- `ContextAssembler` / `SpecialistContextBuilder`：LLM 节点内部使用的可复用上下文构造能力。
+
+主规则：
+
+```text
+LLM node
+  -> context builder
+  -> prompt template
+  -> LLM call
+  -> structured output validation
+  -> state update
+```
+
+确定性节点不需要 context builder，例如：
+
+- `WeatherQueryNode`
+- 纯规则 evaluator
+- provider response normalization
 
 ## API Namespace
 
@@ -824,47 +560,28 @@ Responsibilities:
 POST /api/trip/plan
 ```
 
-Input:
+输入：
 
-- `TripPlanRequest`
+```python
+TripPlanRequest
+```
 
-Output:
+输出：
 
-- `TripPlan`
-
-This endpoint runs the full `TravelPlannerGraph`.
+```python
+TripPlan
+```
 
 ### Recalculate Trip Plan
-
-The edit/recalculate behavior is intentionally deferred, but the namespace and signature are reserved.
 
 ```http
 POST /api/trip/recalculate
 ```
 
-Proposed signature:
+当前是预留 endpoint，返回结构化 `501 Not Implemented`。未来可用于局部重排、删除景点、重新计算价格和路线摘要。
 
-```python
-async def recalculate_trip_plan(
-    request: TripRecalculateRequest,
-) -> TripPlan:
-    ...
-```
+## 小结
 
-Expected future use:
+agents 层是一个围绕 `TravelPlanState` 运行的 LangGraph workflow。主 graph 保持全局规划结构，景点和酒店 specialist 子图负责局部 ReAct 搜索，天气节点保持确定性，Planner 负责生成计划，Validator 负责守住 API 合同，SaveMemoryNode 只在结果有效后写长期记忆。
 
-- Accept a user-edited `TripPlan`.
-- Recalculate per-day price totals.
-- Recalculate map route or ordering.
-- Apply local changes after the user deletes or reorders attractions.
-- Optionally trigger partial replanning later.
-
-No concrete graph implementation is included for this endpoint yet.
-
-## Summary
-
-The agents layer is a LangGraph workflow centered around a shared `TravelPlanState`.
-
-Specialized work is handled by nodes or subgraphs, not by separate independent agents. Attraction and hotel search are implemented as iterative subgraphs because they may need search, evaluation, retry, and ranking. Weather is a simple deterministic node. Planning is the main LLM node. Validation is handled by Pydantic and can route back to planning for repair.
-
-This structure preserves the original functional intent of the multi-agent design while making it more reliable for a web application: data is structured, node outputs are testable, graph execution is observable, and the final response is a validated `TripPlan` that the front end can render directly.
+这种结构把“会思考的 LLM”和“可靠的工程边界”分开：LLM 负责局部决策和行程生成，Pydantic、LangGraph、Amap service、memory store 和 validation 负责让系统稳定运行。

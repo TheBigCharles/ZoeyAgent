@@ -1,339 +1,230 @@
-# Memory Design
+# 记忆设计
 
-This document describes the memory design for a travel planning assistant built as a self-hosted Python web app.
+这份文档说明 ZoeyAgent 的记忆系统。旅行规划助手如果每次请求都从零开始，就很难体现个性化；但如果把所有对话和工具结果都永久保存，又会产生噪声、隐私和成本问题。因此项目把记忆分成两层：当前 session 的 working memory，以及跨 session 的 long-term memory。
 
-The goal is to give the assistant useful continuity across a planning session and across future sessions, without storing every message forever or overcomplicating the MVP.
+当前 MVP 使用：
 
-Target architecture:
+- LangGraph state + `InMemorySaver` 保存当前 session 的 checkpoint。
+- LangGraph `PostgresStore` + Postgres + pgvector 保存长期记忆。
+- Ollama `bge-m3:567m` 作为本地 embedding provider。
+- `MemoryExtractionService` 统一处理 overflow 和 final valid plan 的候选记忆抽取。
 
-- Python web app
-- LangGraph agents workflow
-- Postgres-backed long-term memory
-- Local embedding API served by Ollama with `bge-m3:567m` for the MVP; OpenAI-compatible/vLLM embeddings remain a supported adapter shape.
+## 背景
 
-## Background
+旅行助手需要记忆，主要是因为三个问题：
 
-The travel assistant receives form input from the front end, generates a structured itinerary, and may later support user edits such as deleting attractions or changing the order of a day plan.
+1. 个性化：记住用户稳定偏好，例如轻松节奏、酒店等级、喜欢历史文化景点。
+2. 连续性：记住当前 planning session 中已经发生的事情，例如用户刚补充“不要太赶”。
+3. 历史经验：记住具体决策，例如用户上次拒绝了离景点太远的酒店。
 
-The assistant needs memory for three practical reasons:
+这些信息生命周期不同，所以不应该全部放在同一个存储里。
 
-1. Personalization: remember stable user preferences such as relaxed travel pace, hotel level, disliked options, and food interests.
-2. Continuity: remember important travel decisions such as confirmed routes, rejected hotels, or changed dates.
-3. Current-session coherence: keep track of the ongoing conversation, current trip draft, and temporary tool results while one planning session is active.
+## 记忆类型
 
-This design separates short-lived working memory from long-term memory.
+当前只实现三类记忆：
 
-Working memory is only for the current session. It is not persisted. If something in working memory becomes important, it can be promoted into semantic or episodic memory.
-
-Long-term memory is stored in LangGraph `PostgresStore` and supports memory-level semantic search using embeddings.
-
-## Design Direction
-
-Use three memory types:
-
-- Working memory
-- Semantic memory
-- Episodic memory
-
-Do not implement perceptual memory for the MVP.
-
-The memory layer supports the agents workflow, especially these LangGraph nodes:
-
-- `LoadMemoryNode`: retrieves relevant semantic and episodic memories before planning.
-- `SaveMemoryNode`: extracts useful long-term memory candidates after a successful plan and writes approved candidates to long-term memory when memory is enabled.
-
-## Scope
-
-This design uses three memory types:
-
-- Working memory
-- Semantic memory
-- Episodic memory
-
-Perceptual memory is intentionally out of scope.
-
-## Memory Types
-
-| Memory type | Stores | Lifecycle | Backend |
+| 类型 | 保存内容 | 生命周期 | 后端 |
 | --- | --- | --- | --- |
-| Working memory | Current session messages, trip draft, tool observations | Current session only | LangGraph state + `InMemorySaver` checkpointer |
-| Semantic memory | Long-term travel preferences | Long-term | LangGraph `PostgresStore` + embedding index |
-| Episodic memory | Confirmed, rejected, or modified travel decisions | Long-term | LangGraph `PostgresStore` + embedding index |
+| Working memory | 当前 session 的消息片段、工具摘要、草稿状态 | 当前进程和当前 session | LangGraph state + `InMemorySaver` |
+| Semantic memory | 稳定偏好或可复用事实 | 跨 session | `PostgresStore` + pgvector |
+| Episodic memory | 具体历史事件或决策 | 跨 session | `PostgresStore` + pgvector |
+
+Perceptual memory 不在 MVP 范围内。
 
 ## Working Memory
 
-Working memory is not persisted.
+Working memory 是当前 session 的短期上下文。它回答的是：
 
-It maintains the current session context inside LangGraph state, with `InMemorySaver` used as the checkpointer.
+- 用户这轮刚说了什么？
+- 当前正在规划哪次旅行？
+- 已经有哪些工具调用摘要？
+- 当前 graph state 里有哪些临时假设？
 
-Recommended setup:
+Working memory 存在 `TravelPlanState` 中，并通过 `InMemorySaver` 做 checkpoint。它不是长期数据库，也不会跨进程持久化。
 
-- Working memory backend: LangGraph state + `InMemorySaver`
-- `thread_id`: resolved `session_id` or `trip_session_id`
-- TTL: handled at the app/session layer
-
-- Current session messages
-- Current `trip_draft`
-- Temporary tool observations
-
-Important content from working memory can be promoted into semantic or episodic memory.
-
-Working memory is useful for questions like:
-
-- What has the user said in this session?
-- What trip is currently being planned?
-- What tool results have already been collected?
-- What assumptions are currently active?
-
-Working memory is loaded by continuing the LangGraph run with the same `thread_id`. It is not searched through BM25, TF-IDF, embeddings, or `pgvector`.
-
-Loading flow:
+调用流程：
 
 ```text
-session_id / trip_session_id
-  -> backend resolves missing session_id by generating a new one
-  -> resolved value is used as LangGraph thread_id
-  -> InMemorySaver restores the checkpointed TravelPlanState
-  -> nodes read working_messages, trip_draft, and tool_observations directly from state
+TripPlanRequest
+  -> backend resolves session_id
+  -> session_id becomes LangGraph thread_id
+  -> graph.ainvoke(..., config={"configurable": {"thread_id": session_id}})
+  -> InMemorySaver stores/restores state snapshot for that thread_id
 ```
 
-The first planning request may omit `session_id`. In that case, the backend returns the generated value in `TripPlan.session_id`. The frontend or backend session layer must keep the resolved `session_id` / `trip_session_id` and pass it back on later calls that belong to the same planning session.
+如果前端第一次请求没有 `session_id`，后端会生成一个并在 `TripPlan.session_id` 里返回。前端后续同一 planning session 应该带回这个值。
 
-Example:
+需要注意的是，`InMemorySaver` 保存的是 graph state snapshot。它不是 semantic memory，也不是 episodic memory。它不会自动判断哪些信息值得长期保存。
+
+Working memory 示例：
 
 ```json
 {
-  "messages": [],
-  "trip_draft": {
-    "destination": "Japan",
-    "days": 7,
-    "budget": 12000,
-    "pace": "relaxed",
-    "open_questions": ["departure_city", "exact_dates"]
-  },
-  "tool_observations": []
+  "working_messages": [
+    {
+      "role": "user",
+      "content": "用户希望行程不要太赶"
+    }
+  ],
+  "tool_observations": [
+    "Amap 搜索北京历史文化返回 18 个 POI，保留 9 个"
+  ],
+  "trip_draft": {}
 }
 ```
 
 ## Semantic Memory
 
-Semantic memory stores stable, reusable user travel preferences.
+Semantic memory 保存稳定偏好或可复用事实。它更像用户画像片段。
 
-It should represent facts that are likely to remain useful across future trips.
-
-Namespace:
+命名空间：
 
 ```python
 (user_id, "semantic_memories")
 ```
 
-Example:
+示例：
 
 ```json
 {
-  "text": "User prefers relaxed travel and does not like overpacked daily itineraries.",
+  "text": "用户偏好轻松节奏，不喜欢每天安排太满。",
   "memory_type": "travel_preference",
-  "confidence": 0.9,
-  "updated_at": "2026-05-17T10:00:00"
+  "confidence": 0.9
 }
 ```
 
-Uses:
+适合保存：
 
-- Personalize recommendations
-- Avoid repeatedly asking for known preferences
-- Reuse preferences across sessions
+- 用户偏好轻松旅行。
+- 用户喜欢历史文化景点。
+- 用户通常选择经济型酒店。
+- 用户不喜欢离景点太远的住宿。
 
-Examples of semantic memories:
+不适合保存：
 
-- User prefers relaxed travel.
-- User dislikes overpacked daily itineraries.
-- User prefers 4-star hotels.
-- User likes food-focused trips.
-- User avoids red-eye flights.
+- 某次工具调用返回了多少个 POI。
+- 一次临时失败。
+- 已经存在的重复偏好。
 
 ## Episodic Memory
 
-Episodic memory stores concrete travel decision events.
+Episodic memory 保存具体历史事件或决策。它更像“过去发生过什么”。
 
-It should represent something that happened at a specific time or in a specific trip/session.
-
-Namespace:
+命名空间：
 
 ```python
 (user_id, "episodic_memories")
 ```
 
-Example:
+示例：
 
 ```json
 {
-  "text": "User confirmed a 7-day Japan trip split as 3 days in Tokyo and 4 days in Osaka.",
-  "event_type": "trip_decision_confirmed",
-  "trip_id": "japan_2026_may",
+  "text": "用户在一次北京旅行规划中拒绝了离主要景点太远的酒店。",
+  "event_type": "option_rejected",
   "session_id": "session_001",
-  "importance": 0.8,
-  "timestamp": "2026-05-17T10:20:00"
+  "importance": 0.8
 }
 ```
 
-Uses:
+适合保存：
 
-- Recall previously confirmed, rejected, or modified choices
-- Explain why the current plan is arranged a certain way
-- Avoid recommending options the user already rejected
+- 用户确认过一次杭州 4 天游。
+- 用户拒绝某家酒店，因为离景点太远。
+- 用户把某天从博物馆主题改成自然风光。
+- 用户在某次规划中选择了王府井附近住宿。
 
-Examples of episodic memories:
+## PostgresStore 和 pgvector
 
-- User confirmed Tokyo 3 days and Osaka 4 days for the Japan trip.
-- User rejected a hotel because it was too far from the main attractions.
-- User changed the travel dates from June 10-16 to June 12-18.
-- User removed a museum from the itinerary.
+长期记忆通过 LangGraph `PostgresStore` 写入 Postgres。开启 embedding index 后，`text` 字段会被转成向量并存入 pgvector。
 
-## Postgres Role
+应用代码应使用 Store API：
 
-Postgres is used through LangGraph `PostgresStore`.
+```python
+store.put(namespace, key, value)
+store.search(namespace, query=query, limit=limit)
+```
 
-It stores long-term semantic and episodic memories as:
+不要直接依赖 LangGraph 内部表结构。这样后续升级 LangGraph 或调整 store wrapper 时，业务代码不需要大范围修改。
 
-- Namespace
-- Key
-- JSON document
+## EmbeddingService
 
-With an embedding index configured, the store can support semantic search over memory text.
+当前本地 embedding provider 是 Ollama：
 
-Design decision:
+```text
+Provider: ollama
+Base URL from API container: http://host.docker.internal:11434
+Model: bge-m3:567m
+API: /api/embed
+Vector dimension: 1024
+Embedded field: text
+```
 
-Semantic and episodic memory recall should use `PostgresStore` semantic search, backed by a vectorized embedding index in Postgres using `pgvector`.
+写入和检索必须使用同一个 embedding 模型。如果未来切换到 vLLM 或 OpenAI-compatible embedding endpoint，已有长期记忆需要重新 embedding 并重建索引。
 
-The application should interact with memory through LangGraph Store APIs such as `put`, `get`, and `search`, rather than raw SQL against LangGraph's internal tables.
+## 向量检索流程
 
-## Embedding Model
+### 写入路径
 
-Use `BAAI/bge-m3` through the local embedding provider. The MVP provider is Ollama with model name `bge-m3:567m`.
+当 `SaveMemoryNode` 决定保存一条长期记忆时：
 
-Recommended settings:
+1. 创建包含 `text` 字段的 memory item。
+2. 调用 `PostgresStore.put(namespace, key, value)`。
+3. Store 取出配置好的 embedded field，也就是 `text`。
+4. `EmbeddingService` 调用 Ollama `/api/embed`。
+5. bge-m3 返回 1024 维向量。
+6. Postgres 保存 JSON 文档和 pgvector 向量索引。
 
-- Provider: `ollama`
-- Base URL in Docker: `http://host.docker.internal:11434`
-- Model: `bge-m3:567m`
-- API style: Ollama `/api/embed`
-- Vector dimension: `1024`
-- Embedded field: `text`
-
-The project `EmbeddingService` also keeps an OpenAI-compatible/vLLM path for later deployment by switching `EMBEDDING_PROVIDER`.
-
-The same embedding model must be used for both writes and searches. If the embedding model changes later, semantic and episodic memories should be re-embedded and the index rebuilt.
-
-## Vector Search Flow
-
-Semantic and episodic memories use the same vector-search flow.
-
-### Write Path
-
-When `SaveMemoryNode` decides to persist a memory:
-
-1. It creates a memory item with a clear `text` field.
-2. It calls `PostgresStore.put(namespace, key, value)`.
-3. `PostgresStore` extracts the configured embedded field, currently `text`.
-4. The `text` value is sent to the configured local embedding API.
-5. `BAAI/bge-m3` returns a 1024-dimensional embedding vector.
-6. `PostgresStore` stores the JSON memory value and updates the Postgres `pgvector` index.
-
-Example semantic memory write:
+示例：
 
 ```python
 store.put(
     (user_id, "semantic_memories"),
     "pref_relaxed_travel",
     {
-        "text": "User prefers relaxed travel and dislikes overpacked daily itineraries.",
+        "text": "用户偏好轻松旅行，不喜欢每天安排太满。",
         "memory_type": "travel_preference",
         "confidence": 0.9,
     },
 )
 ```
 
-Example episodic memory write:
+### 读取路径
 
-```python
-store.put(
-    (user_id, "episodic_memories"),
-    "episode_rejected_far_hotel",
-    {
-        "text": "User rejected a hotel because it was too far from the main attractions.",
-        "event_type": "option_rejected",
-        "trip_id": "beijing_2025_11",
-        "importance": 0.8,
-    },
-)
-```
+当 `LoadMemoryNode` 需要召回长期记忆时：
 
-### Read Path
+1. 调用 `PostgresStore.search(namespace, query=..., limit=...)`。
+2. query 被同一个 embedding provider 转成向量。
+3. Postgres 使用 pgvector 做相似度检索。
+4. 返回最相关的 semantic 或 episodic memories。
+5. 这些记忆写入 `TravelPlanState`，供 ContextAssembler 和 Planner 使用。
 
-When `LoadMemoryNode` needs relevant memories:
-
-1. It calls `PostgresStore.search(namespace, query=..., limit=...)`.
-2. `PostgresStore` sends the natural-language query to the same configured embedding API.
-3. `BAAI/bge-m3` returns a 1024-dimensional query vector.
-4. Postgres performs `pgvector` similarity search against the indexed memory vectors.
-5. The closest semantic or episodic memories are returned.
-6. The retrieved memories are added to `TravelPlanState` for `PlannerNode`.
-
-Example semantic memory search:
+示例：
 
 ```python
 semantic_memories = store.search(
     (user_id, "semantic_memories"),
-    query="What travel preferences should be considered for this user?",
+    query="这次旅行应该考虑用户哪些偏好？",
     limit=5,
 )
 ```
 
-Example episodic memory search:
+Working memory 不使用向量检索。它直接存在 graph state 里。
 
-```python
-episodic_memories = store.search(
-    (user_id, "episodic_memories"),
-    query="Has the user rejected hotels far from attractions before?",
-    limit=5,
-)
-```
+## MemoryExtractionService
 
-Working memory does not use vector search. It remains in LangGraph state with `InMemorySaver`.
+系统不会把 working memory 原样复制到长期记忆。所有长期记忆写入前都要经过 `MemoryExtractionService`。
 
-## Memory Flow In Agents
+职责：
 
-Memory connects to the agents graph through two nodes.
+- 读取 working memory 或最终有效 `TripPlan`。
+- 抽取 `MemoryCandidate`。
+- 分类为 semantic、episodic 或 discard。
+- 做基础去重和置信度过滤。
+- 把候选写回 graph state。
+- 由 `SaveMemoryNode` 在合适时机写入长期 store。
 
-```mermaid
-flowchart TD
-    A["TripPlanRequest"] --> B["LoadMemoryNode"]
-    B --> C["TravelPlannerGraph"]
-    C --> D["SaveMemoryNode"]
-    D --> E["TripPlan Response"]
-```
-
-`LoadMemoryNode` runs before planning. It searches semantic and episodic memory using the user's request.
-
-`SaveMemoryNode` runs after successful plan validation. It extracts memory candidates from the current session, classifies them as semantic memory, episodic memory, or discard, deduplicates against existing candidates, keeps approved candidates in graph state, and writes useful semantic and episodic memories to the right `PostgresStore` namespace when long-term memory is enabled.
-
-## Working Memory Extraction
-
-Working memory is not copied wholesale into long-term memory.
-
-Instead, the system uses a shared `MemoryExtractionService` that can be called by different graph nodes.
-
-Responsibilities:
-
-- Read working memory or completed graph state.
-- Extract memory candidates.
-- Classify each candidate as semantic memory, episodic memory, or discard.
-- Deduplicate candidates against existing memories.
-- Return approved candidates for the current graph state.
-- Let `SaveMemoryNode` write approved semantic/episodic candidates to `PostgresStore` after validation succeeds.
-
-Candidate shape:
+候选形状：
 
 ```python
 class MemoryCandidate(BaseModel):
@@ -344,130 +235,118 @@ class MemoryCandidate(BaseModel):
     metadata: dict = {}
 ```
 
-### Trigger 1: Working Memory Overflow
+## 触发点 1：Working Memory Overflow
 
-Working memory keeps recent context, but it should not grow without bound.
+Working memory 不应该无限增长。当前策略是保留最新 50 条消息或观察。
 
-When a new prompt, LLM response, or tool observation is appended:
+当追加消息或工具观察时，统一通过 helper 维护：
 
 ```text
 maintain_working_messages(state, message)
   -> append message
   -> if len(working_messages) > 50:
-       overflow_messages = oldest messages beyond the 50-message limit
-       MemoryExtractionService extracts semantic/episodic candidates
+       overflow = oldest messages beyond limit
+       MemoryExtractionService extracts candidates
        approved candidates are added to memory_candidates
-       overflow_messages are removed from working_messages
+       working_messages keeps latest 50
+
+maintain_tool_observations(state, observation)
+  -> append observation
+  -> if len(tool_observations) > limit:
+       overflow = oldest observations beyond limit
+       MemoryExtractionService extracts candidates
+       approved candidates are added to memory_candidates
+       tool_observations keeps latest limit
 ```
 
-This prevents active session state from growing indefinitely while preserving long-term value before old messages are dropped.
+也就是说，overflow 不是一个独立后台任务自动扫描数据库，而是在每次 append working memory 时由 helper 触发。
 
-This maintenance policy is implemented as a helper around state updates. The agents design may show a conceptual `WorkingMemoryMaintenanceNode` before context assembly, but the actual enforcement should happen whenever working memory is appended.
+## 触发点 2：Final Valid TripPlan
 
-### Trigger 2: Valid TripPlan
-
-After a successful plan:
+最终有效计划生成后，还会进行一次记忆抽取：
 
 ```text
-ValidateTripPlanNode -> SaveMemoryNode -> MemoryExtractionService
+ValidateTripPlanNode valid
+  -> SaveMemoryNode
+  -> MemoryExtractionService
+  -> PostgresStore.put(...)
 ```
 
-The extraction input includes:
+这次抽取很重要，因为有些长期价值只有在计划完成后才明确。例如用户最终选择了哪个酒店、接受了什么节奏、拒绝了什么候选。
 
-- Original request
-- Normalized request
-- Working messages
-- Trip draft
-- Tool observations
-- Final validated `TripPlan`
-- Existing semantic and episodic memories
+它和 overflow 抽取可能有少量重叠，因此 `MemoryExtractionService` 需要做去重。重复候选不应重复写入长期记忆。
 
-This final extraction pass captures stable preferences and concrete decisions that only become clear after the validated plan exists.
+## 分类规则
 
-### Classification Rules
+保存为 semantic memory：
 
-Save to semantic memory when the candidate is a stable preference or reusable fact:
+- 稳定偏好。
+- 可复用事实。
+- 对未来旅行规划仍有价值的信息。
 
-- User prefers relaxed travel.
-- User dislikes shopping-focused attractions.
-- User usually chooses economy hotels.
-- User likes historical and cultural attractions.
+示例：
 
-Save to episodic memory when the candidate is a concrete event or decision:
+```text
+用户偏好轻松节奏。
+用户通常选择经济型酒店。
+用户喜欢历史文化景点。
+```
 
-- User rejected a hotel because it was too far from attractions.
-- User confirmed the Beijing 3-day public-transit itinerary.
-- User changed Day 2 from museums to natural scenery.
-- User exported the final itinerary.
+保存为 episodic memory：
 
-Discard:
+- 具体事件。
+- 确认、拒绝或修改过的旅行决策。
 
-- Temporary loading states
-- Routine acknowledgements
-- Duplicate memories
-- Tool results that did not affect the final plan
+示例：
 
-## Pipeline
+```text
+用户确认过北京 3 天游。
+用户拒绝了离景点太远的酒店。
+用户把第 2 天从博物馆改成自然风光。
+```
 
-1. User input enters working memory.
-2. Retrieve long-term preferences from semantic memory.
-3. Retrieve related historical decisions from episodic memory.
-4. Build the current context.
-5. Let the LLM reason and call tools as needed.
-6. Update working memory.
-7. Extract, classify, and deduplicate important information:
-   - Long-term preference -> semantic memory
-   - Concrete confirmed/rejected/modified decision -> episodic memory
-   - Temporary or duplicate detail -> discard
-8. Keep extracted candidates in graph state for the current step.
-9. After validation succeeds, write approved semantic/episodic memories to `PostgresStore` when long-term memory is enabled.
-10. Return the response.
+丢弃：
 
-## Promotion Rules
+- 临时加载状态。
+- 普通寒暄。
+- 重复记忆。
+- 没有影响最终计划的工具噪声。
 
-Working memory should not be saved wholesale.
+## 与 Agents 层的关系
 
-Only promote information when it has long-term value.
+记忆系统接入 graph 的方式如下：
 
-Promote to semantic memory when the information is a stable preference or reusable fact:
+```mermaid
+flowchart TD
+    A["TripPlanRequest"] --> B["LoadMemoryNode"]
+    B --> C["TravelPlannerGraph"]
+    C --> D{"ValidateTripPlanNode"}
+    D -->|valid| E["SaveMemoryNode"]
+    D -->|repair/fallback| F["No long-term write yet"]
+    E --> G["PostgresStore semantic/episodic memory"]
+```
 
-- "I prefer relaxed trips."
-- "I do not like red-eye flights."
-- "I usually choose economy hotels."
+`LoadMemoryNode` 在规划前读取长期记忆。  
+`SaveMemoryNode` 在有效计划后写长期记忆。  
+working memory 则贯穿整个 graph run，服务当前 session 的连续性。
 
-Promote to episodic memory when the information is a concrete event or decision:
+## 生命周期
 
-- "User confirmed the hotel near Wangfujing."
-- "User rejected the first itinerary because it was too rushed."
-- "User changed Day 2 from museums to natural scenery."
+一次请求结束后，Python 局部变量里的当前 state 会被释放；如果启用了 `InMemorySaver`，同一个 `thread_id` 的 snapshot 会留在进程内存中。进程重启后，这些 working memory 会丢失。
 
-Do not save temporary or low-value details:
+长期记忆不同。semantic 和 episodic memories 写入 PostgresStore 后可以跨 session、跨进程重启继续使用。
 
-- One-off wording from the current chat
-- Temporary loading states
-- Tool results that did not influence the final plan
-- Duplicate memories already stored with the same meaning
+这个设计是有意的：
 
-## Relationship to Agents Design
+- 临时上下文留在 working memory。
+- 长期有价值的信息才进入 PostgresStore。
+- 不把每次工具调用和所有候选 POI 都永久保存。
 
-The memory design supports the LangGraph agents design.
+## 小结
 
-In the agents workflow:
+ZoeyAgent 的记忆系统分为两层：
 
-- `LoadMemoryNode` retrieves semantic and episodic memories.
-- `PlannerNode` uses those memories to personalize the itinerary.
-- `SaveMemoryNode` extracts important preferences and decisions as memory candidates and writes approved semantic/episodic memories to `PostgresStore` when long-term memory is enabled.
+- Working memory：当前 session 的短期上下文，存在 LangGraph state 和 `InMemorySaver`。
+- Long-term memory：跨 session 的偏好和历史决策，存在 PostgresStore + pgvector。
 
-Working memory stays inside the active graph state and is discarded when the session ends, except for information promoted into long-term memory.
-
-The `InMemorySaver` checkpointer improves access to active session state during runtime, but it is not durable. If the app restarts or the process crashes, working memory is lost. This is intentional for the MVP because important information is promoted to semantic or episodic memory.
-
-## Summary
-
-Working memory handles only the current session through LangGraph state and `InMemorySaver`; it is not durable.
-
-Semantic memory stores long-term travel preferences in `PostgresStore`.
-
-Episodic memory stores historical travel decision events in `PostgresStore`.
-
-Both semantic and episodic memory use an embedding index for memory-level semantic search.
+`MemoryExtractionService` 是两者之间的转换层。它会在 working memory overflow 和 final valid plan 后抽取候选记忆，但只有通过分类、去重和置信度过滤的内容才会进入长期记忆。

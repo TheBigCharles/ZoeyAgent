@@ -115,6 +115,10 @@ Amap MCP 被放在工具层，是因为外部 API 的响应往往不适合直接
 
 只有最终 `TripPlan` 通过校验后，`SaveMemoryNode` 才会从本轮 working memory 和有效计划中抽取长期记忆候选。也就是说，系统不会把失败计划、工具噪声或临时错误直接写入长期记忆，而是只沉淀对未来规划真正有帮助的信息。
 
+如果你想把这条主线放进一个具体请求里看，可以继续阅读 [示例工作流：杭州自驾旅行规划](doc/example_workflow.md)。它用一条杭州自驾请求展示每个节点会做什么、会调用哪些工具、哪些内容会进入 state，以及什么时候才会保存长期记忆。
+
+如果你想继续拆开每一层看，可以按下面的路径阅读延伸设计文档：[Backend Design](doc/backend_design.md) 解释 FastAPI、依赖注入、生命周期和 API 边界；[Agents Design](doc/agents_design.md) 解释 LangGraph 主流程、specialist ReAct 子图、Planner、Validate 和 Fallback；[Tools Design](doc/tools_design.md) 解释 Amap MCP、坐标补全、route summary 和 provider response normalization；[Memory Design](doc/memory_design.md) 解释 working memory、semantic memory、episodic memory、overflow 抽取和 PostgresStore。
+
 
 ## 组件职责速览
 
@@ -347,6 +351,8 @@ flowchart TB
 `Location` 和 `MapPoint` 则服务地图可视化。外部 provider 可能把坐标写成字符串，也可能放在不同字段里；后端统一归一成 `Location` 后，再生成 `MapPoint`。前端地图只需要读取经纬度，不需要知道这些坐标最初来自 POI detail、geocode 还是其他工具。
 
 `Attraction`、`Hotel`、`Meal` 和 `WeatherInfo` 是领域模型。它们把真实工具数据、LLM 生成结果和前端展示连接起来。比如 Amap 返回的是 POI，但系统内部会把它转换成 `Attraction` 或 `Hotel`；天气 provider 返回的是 forecast，但最终进入响应的是 `WeatherInfo`。这让上层规划逻辑不用关心每个 provider 的原始格式。
+
+这一部分的详细字段、校验规则和 request/response/internal schema 分层，可以继续看 [Schemas Design](doc/schemas_design.md)。
 
 ### Graph 和 memory 内部合同如何支撑架构
 

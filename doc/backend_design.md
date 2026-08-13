@@ -1,40 +1,29 @@
-﻿# Backend Design
+# 后端设计
 
-This document describes the backend service design for the travel planning assistant.
+这份文档说明 ZoeyAgent 后端服务的设计。后端不是一个简单的 LLM 转发层，而是一个自托管的 FastAPI 应用：它接收结构化旅行请求，解析 `session_id`，运行 LangGraph 旅行规划流程，管理短期和长期记忆，调用 Amap MCP 与 LLM 服务，并返回经过 Pydantic 校验的 `TripPlan`。
 
-The backend is a self-hosted Python FastAPI app that exposes async endpoints, runs the LangGraph travel planner, manages memory dependencies, and returns structured Pydantic responses.
+当前项目已经包含 React 前端和 Docker 本地运行环境。不过这份文档只聚焦后端边界：API 如何进入 graph，依赖如何初始化，错误如何收口，记忆和外部工具如何接入。
 
-Frontend rendering is out of scope for this phase. The first implementation target is terminal-based backend testing with `curl`, HTTP clients, or pytest.
+## 背景
 
-## Background
+旅行规划请求从前端或终端进入后端。用户提供城市、日期、预算、交通偏好、住宿偏好、景点偏好和额外要求。后端需要做的事情并不只是把这些字段拼进 prompt，而是要完成以下工作：
 
-The system already has three design layers:
+- 用 Pydantic 校验输入。
+- 为首次请求生成 `session_id`，为后续请求复用已有 `session_id`。
+- 将 `session_id` 作为 LangGraph 的 `thread_id`，用于当前 session 的 checkpoint。
+- 调用 LangGraph 的 `TravelPlannerGraph`。
+- 通过 Amap MCP 获取真实景点、酒店、天气和路线摘要数据。
+- 通过 LLMService 调用 Gemini 或其他 OpenAI-compatible 模型。
+- 通过 PostgresStore + pgvector + bge-m3 召回和保存长期记忆。
+- 返回前端可直接渲染的 `TripPlan`。
 
-- `schemas_design.md`: Pydantic data contracts
-- `agents_design.md`: LangGraph travel-planning workflow
-- `memory_design.md`: working, semantic, and episodic memory design
-- `tools_design.md`: Amap MCP integration, with photo enrichment deferred and route summaries allowed
+可以把后端理解成系统的中间层：它一边面对 HTTP 客户端，一边协调 graph、工具、模型和记忆。
 
-The backend layer connects those designs into a running service.
-
-The backend is responsible for:
-
-- Accepting structured planning requests.
-- Validating input with Pydantic.
-- Running the async LangGraph planner.
-- Resolving `session_id` and passing it as LangGraph `thread_id`.
-- Managing Postgres-backed long-term memory.
-- Managing `InMemorySaver` working-memory checkpoints.
-- Returning validated `TripPlan` responses.
-- Initializing and sharing external tool integrations such as the Amap MCP server.
-
-## Design Decisions
+## 设计原则
 
 ### Async First
 
-The backend should use async FastAPI route handlers and async graph invocation where possible.
-
-`POST /api/trip/plan` should be async:
+后端路由优先使用 async。`POST /api/trip/plan` 会在请求/响应生命周期内调用 async graph。
 
 ```python
 @router.post("/plan", response_model=TripPlan)
@@ -42,44 +31,33 @@ async def create_trip_plan(request: TripPlanRequest) -> TripPlan:
     ...
 ```
 
-The first version can run the graph within the request/response lifecycle. A background-job model can be added later if planning latency becomes too high.
+第一版不引入后台任务队列。这样实现更直接，也方便用 curl、Swagger UI 和 pytest 验证完整链路。后续如果规划耗时过长，可以再引入任务队列或进度推送。
 
-### Session ID Is Resolved By Backend
+### session_id 由后端解析
 
-`session_id` is optional on the first planning request.
+首次请求可以不传 `session_id`。后端规则如下：
 
-Backend behavior:
+- 如果 `session_id` 缺失、为 `null` 或空字符串，后端生成新的 UUID。
+- 如果 `session_id` 存在，后端 trim 后复用它。
+- graph 执行时必须拿到非空 `session_id`。
+- 最终 `TripPlan.session_id` 必须返回这个 resolved session id。
 
-- If `session_id` is missing, null, or blank, generate a new session ID.
-- If `session_id` is present, trim and reuse it.
-- Always use the resolved non-empty session ID as the LangGraph `thread_id`.
-- Always return the resolved session ID in `TripPlan.session_id`.
-
-Reason:
-
-- `session_id` is the stable key for LangGraph `thread_id`.
-- The frontend may not have a session before the first planning request.
-- Once a session exists, the frontend owns continuity by sending that `session_id` on later requests.
-- Terminal tests can either omit `session_id` to exercise generation or provide one to repeat a session.
-
-Validation rule:
+这样设计是为了让前端首次请求不需要提前创建 session，同时又能在后续请求中延续同一个 planning session。
 
 ```text
-TripPlanRequest.session_id is optional.
-Graph execution requires a resolved non-empty session_id.
-```
-
-Generation rule:
-
-```text
+TripPlanRequest.session_id 可选
 resolved_session_id = request.session_id or generate_session_id()
+LangGraph thread_id = resolved_session_id
+TripPlan.session_id = resolved_session_id
 ```
 
-### Working Memory Uses LangGraph Checkpointer
+前端不应该把完整 session id 展示给用户，但应该在本地保存并随下一次同 session 请求带回。
 
-Working memory is stored as LangGraph state with `InMemorySaver`.
+### Working memory 使用 LangGraph checkpointer
 
-The backend invokes the graph with:
+当前 session 的 working memory 存在 LangGraph state 中，并通过 `InMemorySaver` 做 checkpoint。
+
+graph 调用时使用：
 
 ```python
 config = {
@@ -89,35 +67,32 @@ config = {
 }
 ```
 
-This lets later requests with the same `session_id` resume the same active planning state while the process is alive. If the first request omitted `session_id`, the frontend should read `TripPlan.session_id` from the response and send it on later requests.
+同一进程存活期间，后续请求只要带回相同 `session_id`，就可以恢复同一个 `thread_id` 下的 graph state snapshot。这里的 snapshot 不是长期记忆，也不应该被理解为持久化数据库。
 
-### Long-Term Memory Uses PostgresStore
+### Long-term memory 使用 PostgresStore
 
-Semantic and episodic memory are stored in LangGraph `PostgresStore`.
+跨 session 的长期记忆使用 LangGraph `PostgresStore`，底层是 Postgres + pgvector。文本通过本地 Ollama `bge-m3:567m` 转成 1024 维 embedding。
 
-The store uses:
+长期记忆只保存有复用价值的内容：
 
-- Postgres
-- `pgvector`
-- local Ollama embedding API for the MVP
-- `bge-m3:567m` / `BAAI/bge-m3`
-- 1024-dimensional vectors
+- semantic memory：稳定偏好或事实。
+- episodic memory：具体历史决策或事件。
 
-The backend should interact with long-term memory through LangGraph Store APIs, not raw SQL.
+应用代码应通过 `PostgresStore.put/search` 这类 Store API 访问长期记忆，不直接依赖 LangGraph 内部表结构或 raw SQL。
 
-## Service Structure
+## 服务结构
 
-Recommended structure:
+当前后端目录边界如下：
 
 ```text
-app/
+backend/app/
   config.py
   api/
     main.py
     routes/
       health.py
       trip.py
-      map.py
+      memory.py
   schemas/
     trip.py
     domain.py
@@ -128,6 +103,9 @@ app/
     graph.py
     context.py
     nodes.py
+    attraction_search.py
+    hotel_search.py
+    working_memory.py
   memory/
     store.py
     extraction.py
@@ -137,32 +115,34 @@ app/
     llm_service.py
 ```
 
-For the first implementation, this can be simpler, but the boundaries should stay clear:
+每个目录承担一个清晰边界：
 
-- `api`: HTTP routing
-- `schemas`: Pydantic contracts
-- `agents`: LangGraph construction and invocation
-- `memory`: PostgresStore and extraction logic
-- `services`: external API and LLM service clients
-- `config.py`: settings, dependency wiring, and structured error boundaries
+- `api`：HTTP 路由、依赖获取、错误返回。
+- `schemas`：Pydantic 请求、响应、领域模型和 graph 内部合同。
+- `agents`：LangGraph 构建、节点、上下文组装、specialist 子图。
+- `memory`：长期记忆 store wrapper 和记忆抽取逻辑。
+- `services`：Amap MCP、Embedding、LLM 等外部服务封装。
+- `config.py`：settings、依赖工厂、生命周期和结构化错误。
 
-## Runtime Dependencies
+## 运行依赖
 
-The backend needs these runtime components:
+后端启动时需要准备这些组件：
 
 ```text
 FastAPI app
-LangGraph compiled graph
+TravelPlannerGraph
 InMemorySaver checkpointer
-PostgresStore
-EmbeddingService pointing to Ollama /api/embed
-Amap/weather tool clients
-LLM client for PlannerNode and extraction tasks
+LongTermMemoryStore / PostgresStore
+EmbeddingService -> Ollama /api/embed
+AmapMCPService -> amap-mcp-server
+LLMService -> Gemini/OpenAI-compatible endpoint
 ```
 
-## Configuration
+本地运行使用 Docker Compose。容器内部运行 FastAPI，Postgres 和 pgvector 由 Compose 启动，Ollama 运行在宿主机并通过 `host.docker.internal:11434` 被 API 容器访问。
 
-Expected environment variables:
+## 配置
+
+`backend/.env` 只保留 secrets 和 provider 选择：
 
 ```text
 LLM_BASE_URL=...
@@ -172,27 +152,45 @@ LLM_MODEL_ID=gemini-3.1-flash-lite
 AMAP_MAPS_API_KEY=...
 ```
 
-Docker Compose supplies runtime infrastructure variables such as `HOST`, `PORT`, `MEMORY_ENABLED`, `POSTGRES_URL`, `EMBEDDING_*`, and `AMAP_MCP_COMMAND`. The MVP embedding endpoint is Ollama `/api/embed`; from the API container it is reached through `http://host.docker.internal:11434`. `EmbeddingService` also keeps an OpenAI-compatible path for future vLLM deployment.
+下面这些运行时变量由 `docker-compose.yml` 统一覆盖，不建议放进 `.env`：
 
-## Application Lifecycle
+```text
+HOST
+PORT
+MEMORY_ENABLED
+POSTGRES_URL
+EMBEDDING_PROVIDER
+EMBEDDING_BASE_URL
+EMBEDDING_MODEL
+EMBEDDING_DIMS
+AMAP_MCP_COMMAND
+AMAP_MCP_ARGS
+```
 
-On app startup:
+当前 Docker 路径下，`AMAP_MCP_COMMAND=amap-mcp-server`。不要在 `.env` 里写 Windows 本机 executable 路径。
 
-1. Load config.
-2. Initialize embedding client.
-3. Initialize `PostgresStore` with embedding index config.
-4. Initialize `InMemorySaver`.
-5. Initialize shared Amap MCP tool/server integration.
-6. Skip photo enrichment for the MVP; keep nullable image slots for future use.
-7. Build and compile `TravelPlannerGraph`.
-8. Register API routers.
+## 应用生命周期
 
-On app shutdown:
+FastAPI startup 阶段：
 
-1. Close database/store connections if needed.
-2. Close HTTP clients if needed.
+1. 加载 settings。
+2. 初始化 embedding client。
+3. 初始化长期记忆 store；如果 `MEMORY_ENABLED=false`，则跳过长期记忆。
+4. 初始化 `InMemorySaver`。
+5. 初始化共享 Amap MCP service。
+6. 初始化 LLMService。
+7. 构建并 compile `TravelPlannerGraph`。
+8. 注册 `health`、`trip` 和 `memory` 路由。
 
-## Endpoints
+FastAPI shutdown 阶段：
+
+1. 关闭 Amap MCP session。
+2. 关闭 HTTP client。
+3. 关闭 store 或数据库连接，如果实现需要。
+
+如果依赖初始化失败，应用仍可以启动，但依赖获取会返回结构化 `CONFIGURATION_ERROR`，方便本地调试定位问题。
+
+## API 端点
 
 ### Health Check
 
@@ -200,11 +198,9 @@ On app shutdown:
 GET /health
 ```
 
-Purpose:
+用途是确认服务运行中。
 
-- Verify the service is running.
-
-Response:
+响应：
 
 ```json
 {
@@ -218,57 +214,56 @@ Response:
 POST /api/trip/plan
 ```
 
-Purpose:
+用途是运行完整旅行规划 graph。
 
-- Run the full async `TravelPlannerGraph`.
-
-Input:
+输入：
 
 ```python
 TripPlanRequest
 ```
 
-Backend validation:
+关键规则：
 
-- `session_id` may be absent on the first request; the backend resolves it before graph execution.
-- Date range must be valid.
-- `cities` must be a non-empty list of valid strings.
-- For the current Amap-backed implementation, `cities` should be Chinese city names such as `["北京"]`; English city names are not reliable provider-facing inputs for Amap POI search.
-- Preference indexes must match supported enum values.
-- Budget, if provided, must be non-negative.
+- 首次请求可以不传 `session_id`。
+- 后端会在 graph 执行前解析出非空 `session_id`。
+- `cities` 应使用高德可稳定识别的中文城市名，例如 `["北京"]`。
+- 日期范围必须合法。
+- 偏好索引必须在支持枚举范围内。
+- `budget` 如果提供，必须非负。
 
-Flow:
+调用流程：
 
 ```text
 TripPlanRequest
   -> resolve session_id
-  -> create initial TravelPlanState
+  -> build_initial_state
   -> graph.ainvoke(state, config={"configurable": {"thread_id": session_id}})
-  -> extract final TripPlan
-  -> set TripPlan.session_id
+  -> extract TripPlan
+  -> ensure TripPlan.session_id
   -> return TripPlan
 ```
 
-Output:
+输出：
 
 ```python
 TripPlan
 ```
 
-Response contract:
+响应合同：
 
-- `TripPlan.days[*]` is the primary rendering unit.
-- Each day owns its `meals`, `map_points`, and `total_price`.
-- Top-level `budget` and top-level `map_points` are not part of the response contract.
-- Provider-returned text fields such as `city`, `name`, `address`, and `description` are returned as-is.
-- `TripPlan.session_id` is always present and contains the resolved planning session ID.
+- `TripPlan.days[*]` 是前端主要渲染单位。
+- 每天拥有自己的 `attractions`、`hotel`、`meals`、`map_points` 和 `total_price`。
+- 顶层不返回 `budget`，也不返回顶层 `map_points`。
+- `TripPlan.session_id` 必须存在。
+- provider 返回的 `city`、`name`、`address`、`description` 等文本尽量保持原样。
+- 餐食能力仍是 deferred，当前不把每日三餐作为出 API 的硬校验要求。
 
-Failure behavior:
+失败行为：
 
-- Invalid request -> FastAPI validation error.
-- Missing `session_id` -> generate a new one.
-- Graph fails unexpectedly -> 500 with structured error.
-- Planner cannot produce valid plan after retries -> return fallback result if available, otherwise structured error.
+- 请求非法：FastAPI 默认 validation error。
+- 缺少 `session_id`：后端生成新的。
+- graph 异常：结构化错误，例如 `GRAPH_EXECUTION_FAILED`。
+- planner 多次无法生成有效计划：优先返回 fallback `TripPlan`；如果 fallback 也不可用，则返回结构化错误。
 
 ### Recalculate Trip Plan
 
@@ -276,42 +271,29 @@ Failure behavior:
 POST /api/trip/recalculate
 ```
 
-Status:
+当前状态：
 
-- Route is reserved and implemented as a structured `501 Not Implemented` response.
+- 路由已预留。
+- MVP 返回结构化 `501 Not Implemented`。
+- 错误码为 `TRIP_RECALCULATION_NOT_IMPLEMENTED`。
 
-Signature:
+未来用途：
 
-```python
-@router.post("/recalculate", response_model=TripPlan)
-async def recalculate_trip_plan(request: TripRecalculateRequest) -> TripPlan:
-    ...
-```
+- 接收用户编辑后的 `TripPlan`。
+- 重新计算每日价格。
+- 重新生成 map points 或路线 summary。
+- 支持删除、重排景点。
+- 触发局部 replanning。
 
-For MVP:
-
-- The route returns structured `501 Not Implemented` with code `TRIP_RECALCULATION_NOT_IMPLEMENTED`.
-- The namespace and signature should be reserved.
-
-Future use:
-
-- Accept edited `TripPlan`.
-- Recalculate per-day price totals.
-- Recalculate route or map points.
-- Apply local reorder/delete edits.
-- Optionally trigger partial replanning.
-
-### Memory Inspection: Semantic
+### Semantic Memory Inspection
 
 ```http
 GET /api/memory/semantic
 ```
 
-Purpose:
+用途是本地调试 semantic memory。
 
-- Terminal/debug inspection of semantic memory for a user.
-
-Query parameters:
+查询参数：
 
 ```text
 user_id: str
@@ -319,45 +301,30 @@ query: optional str
 limit: int = 10
 ```
 
-Behavior:
+返回字段包括：
 
-- If `query` is provided, call `PostgresStore.search((user_id, "semantic_memories"), query=query, limit=limit)`.
-- If `query` is absent, list recent memories if supported by store implementation.
-- Return `memory_type`, `user_id`, `query`, `limit`, `count`, and `items`.
-- If long-term memory is disabled, return structured `MEMORY_STORE_UNAVAILABLE`.
+```text
+memory_type
+user_id
+query
+limit
+count
+items
+```
 
-This endpoint is for backend testing and may be disabled in production.
+如果长期记忆未启用或 store 不可用，返回结构化 `MEMORY_STORE_UNAVAILABLE`。
 
-### Memory Inspection: Episodic
+### Episodic Memory Inspection
 
 ```http
 GET /api/memory/episodic
 ```
 
-Purpose:
+用途是本地调试 episodic memory。参数和响应形状与 semantic memory 调试接口一致。
 
-- Terminal/debug inspection of episodic memory for a user.
+这些 memory inspection endpoint 面向本地开发和验证。生产环境上线前应该加鉴权或禁用。
 
-Query parameters:
-
-```text
-user_id: str
-query: optional str
-limit: int = 10
-```
-
-Behavior:
-
-- If `query` is provided, call `PostgresStore.search((user_id, "episodic_memories"), query=query, limit=limit)`.
-- If `query` is absent, list recent memories if supported by store implementation.
-- Return `memory_type`, `user_id`, `query`, `limit`, `count`, and `items`.
-- If long-term memory is disabled, return structured `MEMORY_STORE_UNAVAILABLE`.
-
-This endpoint is for backend testing and may be disabled in production.
-
-## Async Graph Invocation
-
-Route-level pseudocode:
+## Graph 调用伪代码
 
 ```python
 @router.post("/plan", response_model=TripPlan)
@@ -365,56 +332,27 @@ async def create_trip_plan(
     request: TripPlanRequest,
     graph: CompiledStateGraph = Depends(get_travel_graph),
 ) -> TripPlan:
-    session_id = request.session_id or generate_session_id()
-
+    session_id = resolve_session_id(request.session_id)
     resolved_request = request.model_copy(update={"session_id": session_id})
     initial_state = build_initial_state(resolved_request)
     config = {"configurable": {"thread_id": session_id}}
 
     result_state = await graph.ainvoke(initial_state, config=config)
-
     trip_plan = result_state.get("trip_plan")
     if trip_plan is None:
-        raise HTTPException(status_code=500, detail="Trip plan was not generated")
+        raise StructuredAppError(
+            code="GRAPH_EXECUTION_FAILED",
+            message="Trip plan was not generated",
+        )
 
-    trip_plan.session_id = session_id
-    return trip_plan
+    return trip_plan.model_copy(update={"session_id": session_id})
 ```
 
-## Initial State
+当前实现的 `build_initial_state(request)` 很薄，只需要把 `request` 放入 state。具体默认字段由 `InitializeWorkingState` 节点填充。
 
-`build_initial_state(request)` should create:
+## 错误处理
 
-```python
-{
-    "request": request,
-    "working_messages": [
-        {
-            "role": "user",
-            "content": request_to_text(request),
-        }
-    ],
-    "trip_draft": {},
-    "tool_observations": [],
-    "memory_candidates": [],
-    "semantic_memories": [],
-    "episodic_memories": [],
-    "context_packets": [],
-    "planner_context": "",
-    "attractions": [],
-    "weather_info": [],
-    "hotels": [],
-    "trip_plan": None,
-    "validation_errors": [],
-    "retry_count": 0,
-}
-```
-
-## Error Handling
-
-Use structured errors.
-
-Recommended error shape:
+后端使用结构化错误形状：
 
 ```json
 {
@@ -426,128 +364,78 @@ Recommended error shape:
 }
 ```
 
-Common errors:
+常见错误码：
 
 ```text
-INVALID_DATE_RANGE
+CONFIGURATION_ERROR
 GRAPH_EXECUTION_FAILED
 TOOL_CALL_FAILED
 PLAN_VALIDATION_FAILED
-MEMORY_STORE_FAILED
+MEMORY_STORE_UNAVAILABLE
+TRIP_RECALCULATION_NOT_IMPLEMENTED
 ```
 
-For MVP, normal FastAPI exceptions are acceptable, but error codes should be introduced before frontend integration.
+MVP 可以保留 FastAPI 默认请求校验错误，但 graph、tool、planner 和 memory 的异常应收口到统一错误形状。
 
-## Terminal Testing Plan
+## 本地测试
 
-### Health
+启动服务后可以先测 health：
 
-```bash
-curl http://localhost:8000/health
+```powershell
+curl.exe http://127.0.0.1:8000/health
 ```
 
-### Plan Trip
+再测旅行规划：
 
-Current request shape:
-
-```json
-{
-  "user_id": "user_terminal_001",
-  "cities": ["北京"],
-  "start_date": "2026-06-10",
-  "end_date": "2026-06-12",
-  "preferences": {
-    "transport_preference": 0,
-    "accommodation_preference": [0],
-    "attraction_preference": [0, 1]
-  },
-  "budget": 3000,
-  "extra_requirements": "不要安排太赶"
-}
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/trip/plan" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  --data-binary "@backend/tests/fixtures/http_requests/trip-request-beijing-public.json"
 ```
 
-Preference indexes:
+预期：
 
-```text
-transport_preference:
-  0 = public_transport
-  1 = driving
+- 返回值是合法 `TripPlan`。
+- 返回值包含 `session_id`。
+- `days` 数量匹配日期范围。
+- `days[*].total_price` 非负。
+- 有坐标的景点、酒店或餐食会生成 `map_points`。
+- `Attraction.image_url` 可以是 `null`。
+- `route_distance_km`、`route_duration_minutes`、`transit_method` 可以作为轻量路线摘要存在。
+- 不返回完整导航步骤。
+- `weather_info` 在天气工具成功时填充。
+- 验证成功后可能写入 semantic/episodic memory。
 
-accommodation_preference:
-  0 = budget_hotel
-  1 = mid_level_hotel
-  2 = five_star_hotel
+查询长期记忆：
 
-attraction_preference:
-  0 = history_culture
-  1 = nature
-  2 = food
-  3 = shopping
-  4 = art
-  5 = leisure
+```powershell
+curl.exe -G "http://127.0.0.1:8000/api/memory/semantic" `
+  --data-urlencode "user_id=user_terminal_001" `
+  --data-urlencode "query=用户喜欢什么旅行节奏" `
+  --data-urlencode "limit=5"
+
+curl.exe -G "http://127.0.0.1:8000/api/memory/episodic" `
+  --data-urlencode "user_id=user_terminal_001" `
+  --data-urlencode "query=用户拒绝过什么酒店" `
+  --data-urlencode "limit=5"
 ```
 
-```bash
-curl -X POST http://localhost:8000/api/trip/plan \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_terminal_001",
-    "cities": ["北京"],
-    "start_date": "2026-06-10",
-    "end_date": "2026-06-12",
-    "preferences": {
-      "transport_preference": 0,
-      "accommodation_preference": [0],
-      "attraction_preference": [0, 1]
-    },
-    "budget": 3000,
-    "extra_requirements": "不要安排太赶"
-  }'
-```
+## MVP 边界
 
-Expected:
+后端 MVP 不包含：
 
-- Response is valid `TripPlan`.
-- Response includes `session_id`; if the request omitted it, this value was generated by the backend.
-- `days` length matches date range.
-- Each `days[*].meals` contains exactly one `breakfast`, one `lunch`, and one `dinner`.
-- Each `days[*].total_price` is present and non-negative.
-- Each `days[*].map_points` is populated when that day's locations are available.
-- Map points are built only from entities with valid coordinates; Amap POI candidates without coordinates should be enriched through POI detail or geocoding before they become map anchors.
-- `Attraction.image_url` may be `null`; photo enrichment is deferred.
-- `route_distance_km`, `route_duration_minutes`, and `transit_method` may be populated as lightweight route summaries.
-- Full route instructions are not returned in MVP.
-- `weather_info` is populated if weather API succeeds.
-- No top-level `budget` or top-level `map_points` field is required; the frontend calculates trip total from `days[*].total_price`.
-- Semantic/episodic memories may be written after validation.
+- 生产鉴权。
+- 后台任务队列。
+- SSE/WebSocket 进度推送。
+- 完整 recalculation。
+- 真实酒店库存和实时房价确认。
+- 图片 enrichment。
+- 完整 turn-by-turn 路线说明。
 
-### Search Semantic Memory
+MVP 的目标是先稳定返回结构化、可验证、可由前端渲染的 `TripPlan`。
 
-```bash
-curl "http://localhost:8000/api/memory/semantic?user_id=user_terminal_001&query=用户喜欢什么旅行节奏&limit=5"
-```
+## 小结
 
-### Search Episodic Memory
+后端是 ZoeyAgent 的运行中枢。FastAPI 负责 HTTP 边界，LangGraph 负责编排旅行规划，Amap MCP 提供真实地图工具，LLMService 提供模型调用，PostgresStore 提供长期记忆，Pydantic 保证输入输出合同稳定。
 
-```bash
-curl "http://localhost:8000/api/memory/episodic?user_id=user_terminal_001&query=用户拒绝过什么酒店&limit=5"
-```
-
-## Deferred Items
-
-Not part of the backend MVP:
-
-- Frontend rendering
-- Async background job queue
-- WebSocket/SSE progress updates
-- Authentication/authorization
-- Production debug endpoint hardening
-- Full `POST /api/trip/recalculate` implementation
-- Deployment packaging
-
-## Summary
-
-The backend is an async FastAPI service that wraps the LangGraph travel planner.
-
-The backend resolves `session_id`: it reuses a provided value or generates one when missing, then uses it as LangGraph `thread_id` for working-memory checkpoints and returns it in `TripPlan.session_id`. Memory extraction produces semantic and episodic candidates from overflow and final valid plans; when `MEMORY_ENABLED=true`, `LoadMemoryNode` and `SaveMemoryNode` use LangGraph `PostgresStore` with Postgres/pgvector and local `bge-m3` embeddings for durable recall. The current MVP exposes `GET /health`, `POST /api/trip/plan`, memory inspection endpoints, and a reserved `POST /api/trip/recalculate` endpoint that returns structured `501`.
-
+这样做的核心收益是：前端只需要消费 `TripPlan`，而复杂的工具调用、记忆召回、repair、fallback 和 provider response normalization 都被后端封装起来。
