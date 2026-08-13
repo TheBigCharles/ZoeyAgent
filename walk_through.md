@@ -115,9 +115,9 @@ Amap MCP 被放在工具层，是因为外部 API 的响应往往不适合直接
 
 只有最终 `TripPlan` 通过校验后，`SaveMemoryNode` 才会从本轮 working memory 和有效计划中抽取长期记忆候选。也就是说，系统不会把失败计划、工具噪声或临时错误直接写入长期记忆，而是只沉淀对未来规划真正有帮助的信息。
 
-如果你想把这条主线放进一个具体请求里看，可以继续阅读 [示例工作流：杭州自驾旅行规划](doc/example_workflow.md)。它用一条杭州自驾请求展示每个节点会做什么、会调用哪些工具、哪些内容会进入 state，以及什么时候才会保存长期记忆。
+**这里有一个非常好的应用场景示例，建议阅读** [示例工作流：杭州自驾旅行规划](doc/example_workflow.md)。它用一条杭州自驾请求展示每个节点会做什么、会调用哪些工具、哪些内容会进入 state，以及什么时候才会保存长期记忆。
 
-**这里非常建议继续拆开每一层看**，可以按下面的路径阅读延伸设计文档，可以了解各个模块的细节，**对深入理解这个项目很有帮助**：[Backend Design](doc/backend_design.md) 解释 FastAPI、依赖注入、生命周期和 API 边界；[Agents Design](doc/agents_design.md) 解释 LangGraph 主流程、specialist ReAct 子图、Planner、Validate 和 Fallback；[Tools Design](doc/tools_design.md) 解释 Amap MCP、坐标补全、route summary 和 provider response normalization；[Memory Design](doc/memory_design.md) 解释 working memory、semantic memory、episodic memory、overflow 抽取和 PostgresStore。
+**这里非常建议继续拆开每一层看**，可以了解各个模块的细节，**对深入理解这个项目很有帮助**：[Backend Design](doc/backend_design.md) 解释 FastAPI、依赖注入、生命周期和 API 边界；[Agents Design](doc/agents_design.md) 解释 LangGraph 主流程、specialist ReAct 子图、Planner、Validate 和 Fallback；[Tools Design](doc/tools_design.md) 解释 Amap MCP、坐标补全、route summary 和 provider response normalization；[Memory Design](doc/memory_design.md) 解释 working memory、semantic memory、episodic memory、overflow 抽取和 PostgresStore。
 
 
 ## 组件职责速览
